@@ -62,13 +62,11 @@ class RandomBehavior:
             if len(parts) > 1:
                 return parts
 
-        # 困倦加 zzz
-        if mood == 'sleepy' and random.random() < 0.15:
-            reply += random.choice(['...zzz', ' (打哈欠)', '...困', '..'])
-
-        # 兴奋加感叹号
-        if mood == 'excited' and random.random() < 0.1:
-            reply = re.sub(r'[。！!]?$', '!!!', reply)
+        # 困倦/兴奋修饰已关闭，防止 OOC
+        # if mood == 'sleepy' and random.random() < 0.15:
+        #     reply += random.choice(['...zzz', ' (打哈欠)', '...困', '..'])
+        # if mood == 'excited' and random.random() < 0.1:
+        #     reply = re.sub(r'[。！!]?$', '!!!', reply)
 
         return reply
 
