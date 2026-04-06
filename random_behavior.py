@@ -39,18 +39,18 @@ class RandomBehavior:
         if r < 0.05:
             rep = self._check_repeat(session_id, user_msg)
             if rep: return rep
-        # 3% 只发表情
-        if 0.05 <= r < 0.08:
-            return random.choice(EMOJI_ONLY)
+        # 只发表情 (已关闭，改为 > 0 的值可开启，如 0.05 <= r < 0.08)
+        # if 0.05 <= r < 0.08:
+        #     return random.choice(EMOJI_ONLY)
         return None
 
     def modify_reply(self, reply: str, mood: str) -> str | list[str]:
         """对 AI 回复进行随机修饰，可能返回 list 表示分多条发"""
         r = random.random()
 
-        # 8% 加颜文字
-        if r < 0.08:
-            reply = reply + ' ' + random.choice(KAOMOJIS)
+        # 加颜文字 (已关闭，改为 r < 0.08 可开启)
+        # if r < 0.08:
+        #     reply = reply + ' ' + random.choice(KAOMOJIS)
 
         # 5% 打错字
         if 0.08 <= r < 0.13:
