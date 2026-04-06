@@ -62,7 +62,11 @@ class AlivePersonaPlugin(Star):
         # 设置情绪基线
         self.emotion.set_baseline(self.persona.get_emotion_baseline())
 
+        # 好感度开关 (persona.json 中设置 "enable_favorability": false 可关闭)
+        self.enable_favorability = self.persona.persona.get('enable_favorability', True)
+
         logger.info(f"[AlivePersona] 已加载人设: {self.persona.get_name()}")
+        logger.info(f"[AlivePersona] 好感度系统: {'开启' if self.enable_favorability else '关闭'}")
 
     async def initialize(self):
         logger.info("[AlivePersona] 插件已激活")
@@ -88,8 +92,9 @@ class AlivePersonaPlugin(Star):
         relation = self.memory.get_relation(user_id)
         self.emotion.update_from_message(message_text, relation)
 
-        # 更新好感度
-        self._process_favorability(user_id, message_text)
+        # 更新好感度 (可通过 persona.json 关闭)
+        if self.enable_favorability:
+            self._process_favorability(user_id, message_text)
 
         # 检查是否需要记住
         if self.memory.should_remember(message_text):
@@ -231,18 +236,20 @@ class AlivePersonaPlugin(Star):
             'close_friend': '好朋友', 'friend': '朋友',
             'acquaintance': '认识', 'stranger': '陌生人',
         }
-        info = (
-            f"关于你的记忆:\n"
-            f"{desc}\n\n"
-            f"好感度: {fav}/100\n"
-            f"关系: {rel_cn.get(rel, rel)}\n"
-            f"互动次数: {count}"
-        )
+        parts = [f"关于你的记忆:\n{desc}\n"]
+        if self.enable_favorability:
+            parts.append(f"好感度: {fav}/100")
+            parts.append(f"关系: {rel_cn.get(rel, rel)}")
+        parts.append(f"互动次数: {count}")
+        info = '\n'.join(parts)
         yield event.plain_result(info)
 
     @register_command("favorability", alias={"好感度"})
     async def cmd_favorability(self, event: AstrMessageEvent):
         """查看好感度"""
+        if not self.enable_favorability:
+            yield event.plain_result("好感度系统已关闭")
+            return
         user_id = event.get_sender_id()
         profile = self.memory.get_profile(user_id)
         fav = profile['favorability']
