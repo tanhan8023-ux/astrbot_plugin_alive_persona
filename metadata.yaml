@@ -1,0 +1,6 @@
+name: astrbot_plugin_alive_persona
+author: asterbot
+desc: "活人感插件 - 情绪系统/记忆系统/主动发言/上下文理解/个性化回复/随机行为，让你的 bot 像真人一样聊天"
+version: "1.0.0"
+repo: ""
+display_name: "活人感人设插件"
