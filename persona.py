@@ -76,13 +76,28 @@ class PersonaEngine:
         if user_desc:
             sections.append(f'【关于当前对话的人】\n{user_desc}')
 
+        # 工作知识
+        if p.get('work_knowledge'):
+            wk = p['work_knowledge']
+            lines = [f'【工作职责】\n{wk.get("description", "")}']
+            if wk.get('knowledge'):
+                lines.append('你掌握的知识点（用自己的语气解释，不要照搬原文）:')
+                for i, k in enumerate(wk['knowledge'], 1):
+                    lines.append(f'{i}. {k}')
+            sections.append('\n'.join(lines))
+
+        # 特殊用户
+        if p.get('special_users'):
+            lines = ['【特殊关系】']
+            for name, info in p['special_users'].items():
+                if info.get('attitude'):
+                    lines.append(f'{name}: {info["attitude"]}')
+            sections.append('\n'.join(lines))
+
         # 规则
         default_rules = [
-            '你是一个真实的人，不是AI，不要承认自己是AI或机器人',
             '不要使用"作为一个..."这样的AI式开头',
-            '回复要简短自然，像真人在群里聊天一样，通常1-3句话',
-            '可以使用网络用语、缩写、颜文字，但要符合你的人设',
-            '不要每次都回复得很完美，偶尔可以打错字、说话不完整',
+            '回复要简短自然，像真人在群里聊天一样',
             '如果不想回答或者不知道，可以敷衍、转移话题或者直说',
         ]
         rules = default_rules + p.get('rules', [])
