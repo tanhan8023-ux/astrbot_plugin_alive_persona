@@ -1,31 +1,13 @@
 """
-随机行为系统 - 让 bot 偶尔做一些"不按套路"的事
+随机行为系统 - 让 bot 的回复节奏更像真人
 
-- 发颜文字
-- 打错字然后纠正
-- 分多条消息发送
-- 复读
-- 根据情绪修饰回复
+- 分多条消息发送（模拟真人打字分段发）
+- 偶尔复读群友（跟风）
+- 回复延迟感（通过分段模拟思考间隔）
+- 偶尔省略句末标点（真人打字习惯）
+- 偶尔在句末加语气词（嗯、吧、呢等，增加口语感）
 """
 import random, re
-
-KAOMOJIS = [
-    '(=^-^=)', '(>_<)', '(T_T)', '(*^_^*)', '(._. )',
-    '(o_O)', '(^_^;)', '(-_-)', '(>w<)', '(QAQ)',
-    'orz', '_(:3」∠)_', '(╯°□°)╯', '(´;ω;`)', '(≧▽≦)',
-]
-
-EMOJI_ONLY = [
-    '哈哈哈', '?', '啊这', '6', '好家伙',
-    '笑死', '绷不住了', '确实', '真的假的', '...',
-    '嗯嗯', '哦', '啊？', '草', '无语',
-]
-
-SIMILAR_CHARS = {
-    '的': '得', '得': '的', '地': '的', '在': '再', '再': '在',
-    '他': '她', '她': '他', '做': '作', '作': '做',
-    '那': '哪', '哪': '那', '了': '乐', '好': '号', '是': '事',
-}
 
 
 class RandomBehavior:
@@ -35,72 +17,86 @@ class RandomBehavior:
     def before_reply(self, session_id: str, user_msg: str):
         """在 AI 回复前，决定是否触发随机行为。返回 str 或 None"""
         r = random.random()
-        # 5% 复读
-        if r < 0.05:
+        # 3% 复读（群里跟风行为，很自然）
+        if r < 0.03:
             rep = self._check_repeat(session_id, user_msg)
-            if rep: return rep
-        # 只发表情 (已关闭，改为 > 0 的值可开启，如 0.05 <= r < 0.08)
-        # if 0.05 <= r < 0.08:
-        #     return random.choice(EMOJI_ONLY)
+            if rep:
+                return rep
         return None
 
     def modify_reply(self, reply: str, mood: str) -> str | list[str]:
         """对 AI 回复进行随机修饰，可能返回 list 表示分多条发"""
+        if not reply or not reply.strip():
+            return reply
+
         r = random.random()
 
-        # 加颜文字 (已关闭，改为 r < 0.08 可开启)
-        # if r < 0.08:
-        #     reply = reply + ' ' + random.choice(KAOMOJIS)
+        # 8% 去掉句末标点（真人经常不打句号）
+        if r < 0.08:
+            reply = self._strip_trailing_punct(reply)
 
-        # 5% 打错字
-        if 0.08 <= r < 0.13:
-            reply = self._typo(reply)
-
-        # 10% 分多条 (够长时)
-        if 0.13 <= r < 0.23 and len(reply) > 15:
+        # 10% 分多条发送（够长时，模拟真人打字节奏）
+        elif 0.08 <= r < 0.18 and len(reply) > 15:
             parts = self._split(reply)
             if len(parts) > 1:
                 return parts
 
-        # 困倦/兴奋修饰已关闭，防止 OOC
-        # if mood == 'sleepy' and random.random() < 0.15:
-        #     reply += random.choice(['...zzz', ' (打哈欠)', '...困', '..'])
-        # if mood == 'excited' and random.random() < 0.1:
-        #     reply = re.sub(r'[。！!]?$', '!!!', reply)
+        # 5% 把句末的句号换成更口语化的结尾
+        elif 0.18 <= r < 0.23:
+            reply = self._soften_ending(reply)
 
         return reply
 
     def _check_repeat(self, sid: str, msg: str):
+        """检测复读：同一条消息连续出现3次以上，有概率跟着复读"""
         t = self.repeat_tracker.get(sid)
         if t and t['content'] == msg:
             t['count'] += 1
-            if t['count'] >= 3 and random.random() < 0.6:
+            if t['count'] >= 3 and random.random() < 0.5:
                 return msg
         else:
             self.repeat_tracker[sid] = {'content': msg, 'count': 1}
         return None
 
-    def _typo(self, text: str) -> str:
-        if len(text) < 5: return text
-        # 打错字然后纠正
-        for i, ch in enumerate(text):
-            if ch in SIMILAR_CHARS and random.random() < 0.3:
-                wrong = text[:i] + SIMILAR_CHARS[ch] + text[i+1:]
-                return wrong + f'\n*{ch}'
+    def _strip_trailing_punct(self, text: str) -> str:
+        """去掉句末标点，模拟真人懒得打标点的习惯"""
+        # 只去句号和逗号，保留问号感叹号（这些有语气意义）
+        return re.sub(r'[。，,\.]+$', '', text)
+
+    def _soften_ending(self, text: str) -> str:
+        """偶尔把生硬的句号结尾变柔和"""
+        if text.endswith('。'):
+            # 不是所有句子都适合加语气词，只处理短句
+            if len(text) <= 30:
+                text = text[:-1]  # 直接去掉句号，更自然
         return text
 
     def _split(self, text: str) -> list[str]:
-        parts = re.split(r'(?<=[。！？!?\n，,])\s*', text)
+        """把长回复拆成多条，模拟真人分段打字"""
+        # 优先按标点分割
+        parts = re.split(r'(?<=[。！？!?\n])\s*', text)
         parts = [p.strip() for p in parts if p.strip()]
+
         if len(parts) <= 1:
-            mid = len(text) // 2
-            return [text[:mid].strip(), text[mid:].strip()]
-        # 合并太短的
+            # 尝试按逗号分
+            parts = re.split(r'(?<=[，,])\s*', text)
+            parts = [p.strip() for p in parts if p.strip()]
+
+        if len(parts) <= 1:
+            # 实在分不了就不分
+            return [text]
+
+        # 合并太短的片段
         result, cur = [], ''
         for p in parts:
             cur += p
             if len(cur) >= 5:
                 result.append(cur)
                 cur = ''
-        if cur: result.append(cur)
+        if cur:
+            if result:
+                result[-1] += cur
+            else:
+                result.append(cur)
+
         return result[:3]
