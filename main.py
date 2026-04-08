@@ -145,12 +145,12 @@ class AlivePersonaPlugin(Star):
         modified = self.random_behavior.modify_reply(original, mood)
 
         if isinstance(modified, list):
-            # 分多条发送: 只保留第一条作为主回复，其余通过 send 发出
-            response.completion_text = modified[0]
-            # 延迟发送后续消息
-            for part in modified[1:]:
+            # 分多条发送: 全部通过 send 按顺序手动发出，避免乱序
+            response.completion_text = ""
+            for i, part in enumerate(modified):
                 try:
-                    await asyncio.sleep(0.5 + random.random())
+                    if i > 0:
+                        await asyncio.sleep(0.5 + random.random())
                     result = MessageEventResult().message(part)
                     await event.send(result)
                 except Exception:
