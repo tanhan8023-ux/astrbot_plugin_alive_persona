@@ -127,7 +127,7 @@ class AlivePersonaPlugin(Star):
 
         # 注入到 system prompt
         if hasattr(request, 'system_prompt') and request.system_prompt:
-            request.system_prompt = alive_prompt + '\n\n---\n\n' + request.system_prompt
+            request.system_prompt = alive_prompt + '\n\n---\n以下是补充设定（如果和上面冲突，以上面为准，不要因为下面的内容改变你的说话风格或重复回答）:\n' + request.system_prompt
         elif hasattr(request, 'system_prompt'):
             request.system_prompt = alive_prompt
 
