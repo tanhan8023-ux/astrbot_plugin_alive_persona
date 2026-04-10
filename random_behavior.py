@@ -6,6 +6,7 @@
 - 回复延迟感（通过分段模拟思考间隔）
 - 偶尔省略句末标点（真人打字习惯）
 - 偶尔在句末加语气词（嗯、吧、呢等，增加口语感）
+- 去除 LLM 重复表达的句子
 """
 import random, re
 
@@ -57,6 +58,69 @@ class RandomBehavior:
         else:
             self.repeat_tracker[sid] = {'content': msg, 'count': 1}
         return None
+
+    @staticmethod
+    def deduplicate(text: str) -> str:
+        """去除 LLM 回复中语义重复的句子。
+        
+        把回复按句子拆开，如果后面的句子和前面某句字符重叠率过高，就砍掉。
+        这能解决 LLM 经常"好的知道了。我知道了没问题。"这种重复表达。
+        """
+        if not text or len(text) < 10:
+            return text
+
+        # 按句末标点拆句，保留标点
+        sentences = re.split(r'(?<=[。！？!?\n])', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if len(sentences) <= 1:
+            return text
+
+        kept = [sentences[0]]
+        for sent in sentences[1:]:
+            if RandomBehavior._is_redundant(sent, kept):
+                continue
+            kept.append(sent)
+
+        result = ''.join(kept)
+        return result if result.strip() else text
+
+    @staticmethod
+    def _is_redundant(candidate: str, existing: list[str]) -> bool:
+        """判断 candidate 是否和 existing 中的某句语义重复。
+        
+        用字符级别的 bigram 重叠率来判断，不依赖任何外部库。
+        """
+        # 去掉标点和空白，只留实际内容
+        clean_cand = re.sub(r'[^\w]', '', candidate)
+        if len(clean_cand) < 4:
+            return False  # 太短的不判（语气词、"嗯"、"好"之类的）
+
+        cand_bigrams = set()
+        for i in range(len(clean_cand) - 1):
+            cand_bigrams.add(clean_cand[i:i+2])
+
+        if not cand_bigrams:
+            return False
+
+        for sent in existing:
+            clean_sent = re.sub(r'[^\w]', '', sent)
+            if len(clean_sent) < 4:
+                continue
+            sent_bigrams = set()
+            for i in range(len(clean_sent) - 1):
+                sent_bigrams.add(clean_sent[i:i+2])
+            if not sent_bigrams:
+                continue
+            # 双向重叠：candidate 的 bigram 有多少在 sent 里，反过来也算
+            overlap = len(cand_bigrams & sent_bigrams)
+            ratio_cand = overlap / len(cand_bigrams)
+            ratio_sent = overlap / len(sent_bigrams)
+            # 取较大值，任一方向高度重叠就算重复
+            if max(ratio_cand, ratio_sent) > 0.6:
+                return True
+
+        return False
 
     def _strip_trailing_punct(self, text: str) -> str:
         """去掉句末标点，模拟真人懒得打标点的习惯"""

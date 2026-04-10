@@ -141,6 +141,9 @@ class AlivePersonaPlugin(Star):
         mood = self.emotion.get_mood()
         original = response.completion_text
 
+        # 先去除 LLM 重复表达的句子
+        original = self.random_behavior.deduplicate(original)
+
         # 随机行为修饰
         modified = self.random_behavior.modify_reply(original, mood)
 
