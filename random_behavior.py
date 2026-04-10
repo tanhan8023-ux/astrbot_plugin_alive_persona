@@ -1,11 +1,9 @@
 """
 随机行为系统 - 让 bot 的回复节奏更像真人
 
-- 分多条消息发送（模拟真人打字分段发）
 - 偶尔复读群友（跟风）
-- 回复延迟感（通过分段模拟思考间隔）
 - 偶尔省略句末标点（真人打字习惯）
-- 偶尔在句末加语气词（嗯、吧、呢等，增加口语感）
+- 偶尔把句末句号去掉（更口语化）
 - 去除 LLM 重复表达的句子
 """
 import random, re
@@ -25,8 +23,8 @@ class RandomBehavior:
                 return rep
         return None
 
-    def modify_reply(self, reply: str, mood: str) -> str | list[str]:
-        """对 AI 回复进行随机修饰，可能返回 list 表示分多条发"""
+    def modify_reply(self, reply: str, mood: str) -> str:
+        """对 AI 回复进行随机修饰"""
         if not reply or not reply.strip():
             return reply
 
@@ -36,14 +34,8 @@ class RandomBehavior:
         if r < 0.08:
             reply = self._strip_trailing_punct(reply)
 
-        # 10% 分多条发送（够长时，模拟真人打字节奏）
-        elif 0.08 <= r < 0.18 and len(reply) > 15:
-            parts = self._split(reply)
-            if len(parts) > 1:
-                return parts
-
         # 5% 把句末的句号换成更口语化的结尾
-        elif 0.18 <= r < 0.23:
+        elif 0.08 <= r < 0.13:
             reply = self._soften_ending(reply)
 
         return reply
@@ -135,32 +127,4 @@ class RandomBehavior:
                 text = text[:-1]  # 直接去掉句号，更自然
         return text
 
-    def _split(self, text: str) -> list[str]:
-        """把长回复拆成多条，模拟真人分段打字"""
-        # 优先按标点分割
-        parts = re.split(r'(?<=[。！？!?\n])\s*', text)
-        parts = [p.strip() for p in parts if p.strip()]
 
-        if len(parts) <= 1:
-            # 尝试按逗号分
-            parts = re.split(r'(?<=[，,])\s*', text)
-            parts = [p.strip() for p in parts if p.strip()]
-
-        if len(parts) <= 1:
-            # 实在分不了就不分
-            return [text]
-
-        # 合并太短的片段
-        result, cur = [], ''
-        for p in parts:
-            cur += p
-            if len(cur) >= 5:
-                result.append(cur)
-                cur = ''
-        if cur:
-            if result:
-                result[-1] += cur
-            else:
-                result.append(cur)
-
-        return result[:3]

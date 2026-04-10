@@ -16,11 +16,10 @@ AstrBot 活人感插件 - 主入口
 import os
 import re
 import random
-import asyncio
 import logging
 
 from astrbot.api.star import Context, Star
-from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.api.event import AstrMessageEvent
 from astrbot.core.star.register import (
     register_command,
     register_on_llm_request,
@@ -144,22 +143,10 @@ class AlivePersonaPlugin(Star):
         # 先去除 LLM 重复表达的句子
         original = self.random_behavior.deduplicate(original)
 
-        # 随机行为修饰
+        # 随机行为修饰（不再分条，只做文本修饰）
         modified = self.random_behavior.modify_reply(original, mood)
 
-        if isinstance(modified, list):
-            # 分多条发送: 全部通过 send 按顺序手动发出，避免乱序
-            response.completion_text = ""
-            for i, part in enumerate(modified):
-                try:
-                    if i > 0:
-                        await asyncio.sleep(0.5 + random.random())
-                    result = MessageEventResult().message(part)
-                    await event.send(result)
-                except Exception:
-                    pass
-        else:
-            response.completion_text = modified
+        response.completion_text = modified
 
     @register_after_message_sent()
     async def after_sent(self, event: AstrMessageEvent):
