@@ -1,6 +1,9 @@
 import tempfile
+import json
 
+from living_state import LivingState
 from memory import MemorySystem
+from persona import PersonaEngine
 from personalization import match_special_user, special_prompt_text
 from random_behavior import RandomBehavior
 
@@ -59,3 +62,33 @@ def test_random_behavior_deduplicates_repeated_meaning():
     text = "知道了。知道了没问题。"
 
     assert RandomBehavior.deduplicate(text) == "知道了。"
+
+
+def test_recent_status_is_structured_and_described():
+    memory = MemorySystem(tempfile.mkdtemp())
+    memory.remember_from_message("s", "u", "小林", "我今天有点累")
+
+    profile_text = memory.get_profile_description("u")
+    assert "ta最近的状态" in profile_text
+    assert "状态" in memory.get_recent_status_text("u")
+
+
+def test_private_persona_takes_precedence():
+    data_dir = tempfile.mkdtemp()
+    with open(f"{data_dir}/persona.json", "w", encoding="utf-8") as f:
+        json.dump({"name": "公开"}, f, ensure_ascii=False)
+    with open(f"{data_dir}/persona_private.json", "w", encoding="utf-8") as f:
+        json.dump({"name": "私有"}, f, ensure_ascii=False)
+
+    persona = PersonaEngine(data_dir)
+    assert persona.get_name() == "私有"
+    assert persona.loaded_from.endswith("persona_private.json")
+
+
+def test_living_state_light_reply_skips_requests_and_special_users():
+    state = LivingState()
+    atmosphere = {"mood": "热闹"}
+
+    assert not state.should_light_reply("怎么配置api", "stranger", atmosphere, False, 1.0)
+    assert not state.should_light_reply("随便说句话", "stranger", atmosphere, True, 1.0)
+    assert state.should_light_reply("随便说句话", "stranger", atmosphere, False, 1.0)

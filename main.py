@@ -29,6 +29,7 @@ from astrbot.core.star.register import (
 )
 
 from .emotion import EmotionSystem
+from .living_state import LivingState
 from .memory import MemorySystem
 from .persona import PersonaEngine
 from .personalization import match_special_user, special_prompt_text
@@ -58,16 +59,19 @@ class AlivePersonaPlugin(Star):
         self.emotion = EmotionSystem()
         self.memory = MemorySystem(self.data_dir)
         self.persona = PersonaEngine(self.data_dir)
+        self.living_state = LivingState()
         self.random_behavior = RandomBehavior()
         self.behavior_config = {
             'companion_mode': self.persona.persona.get('companion_mode', True),
             'max_reply_chars': int(self.persona.persona.get('max_reply_chars', 60)),
             'short_reply_rate': float(self.persona.persona.get('short_reply_rate', 0.06)),
+            'light_reply_rate': float(self.persona.persona.get('light_reply_rate', 0.12)),
             'repeat_rate': float(self.persona.persona.get('repeat_rate', 0.03)),
             'recent_context_limit': int(self.persona.persona.get('recent_context_limit', 12)),
             'template_tail_filter': bool(self.persona.persona.get('template_tail_filter', True)),
         }
         self.last_reply_strategy: dict[str, str] = {}
+        self.force_light_reply: dict[str, bool] = {}
 
         # 设置情绪基线
         self.emotion.set_baseline(self.persona.get_emotion_baseline())
@@ -94,6 +98,7 @@ class AlivePersonaPlugin(Star):
             user_name = event.get_sender_name()
             session_id = event.unified_msg_origin
             message_text = event.get_message_str()
+            rhythm_state = self.living_state.observe(session_id, user_id)
 
             # 更新记忆
             self.memory.add_message(session_id, user_id, user_name, message_text, is_bot=False)
@@ -124,14 +129,27 @@ class AlivePersonaPlugin(Star):
             user_desc = self.memory.get_profile_description(user_id, special_prompt=special_prompt)
             atmosphere = self.memory.get_session_atmosphere(session_id)
             group_ctx = self._build_group_context(atmosphere)
+            presence_ctx = self.living_state.build_presence_prompt(
+                rhythm_state['user_gap_minutes'], rhythm_state['session_gap_minutes']
+            )
             recent_context = self.memory.get_recent_context(
                 session_id, self.behavior_config['recent_context_limit'], exclude_latest=True
             )
+            light_reply = self.living_state.should_light_reply(
+                message=message_text,
+                relation=relation,
+                atmosphere=atmosphere,
+                special=bool(special),
+                light_reply_rate=self.behavior_config['light_reply_rate'],
+            )
+            self.force_light_reply[session_id] = light_reply
             reply_strategy = self._build_reply_strategy(
                 user_id=user_id,
                 message=message_text,
                 relation=relation,
                 atmosphere=atmosphere,
+                presence_ctx=presence_ctx,
+                light_reply=light_reply,
                 special=bool(special),
             )
             self.last_reply_strategy[session_id] = reply_strategy
@@ -146,6 +164,7 @@ class AlivePersonaPlugin(Star):
                 mood_desc=mood_desc,
                 user_desc=user_desc,
                 group_ctx=group_ctx,
+                presence_ctx=presence_ctx,
                 recent_context=recent_context,
                 reply_strategy=reply_strategy,
                 special_prompt=special_prompt,
@@ -191,6 +210,7 @@ class AlivePersonaPlugin(Star):
                 mood,
                 max_chars=self.behavior_config['max_reply_chars'],
                 short_reply_rate=self.behavior_config['short_reply_rate'],
+                force_short_reply=self.force_light_reply.pop(session_id, False),
                 template_tail_filter=self.behavior_config['template_tail_filter'],
                 allow_short_reply=self.behavior_config['companion_mode'],
             )
@@ -238,7 +258,7 @@ class AlivePersonaPlugin(Star):
             f"身份: {identity}\n"
             f"性格: {personality}\n"
             f"当前心情: {mood_cn.get(mood, mood)}\n"
-            f"人设文件: data/persona.json (可自行编辑)"
+            f"人设文件: {os.path.relpath(self.persona.loaded_from, os.path.dirname(os.path.abspath(__file__)))}"
         )
         yield event.plain_result(info)
 
@@ -295,13 +315,16 @@ class AlivePersonaPlugin(Star):
         session_id = event.unified_msg_origin
         user_id = event.get_sender_id()
         mood = self.emotion.get_mood()
+        rhythm = self.living_state.get_rhythm()
         atmosphere = self.memory.get_session_atmosphere(session_id)
         relation = self.memory.get_relation(user_id, bool(self._match_special_user(user_id, event.get_sender_name())))
         info = (
             f"心情: {mood}\n"
+            f"生活节律: {rhythm['period']}\n"
             f"群聊氛围: {atmosphere['mood']} | 近1分钟{atmosphere['message_rate']}条 | 活跃{atmosphere['active_users']}人\n"
             f"关系: {relation}\n"
             f"短回概率: {self.behavior_config['short_reply_rate']:.2f}\n"
+            f"轻回概率: {self.behavior_config['light_reply_rate']:.2f}\n"
             f"上下文条数: {self.behavior_config['recent_context_limit']}\n"
             f"长期记忆: {len(self.memory.long_term)}条\n"
             f"上次策略: {self.last_reply_strategy.get(session_id, '暂无')}"
@@ -370,11 +393,15 @@ class AlivePersonaPlugin(Star):
         message: str,
         relation: str,
         atmosphere: dict,
+        presence_ctx: str = '',
+        light_reply: bool = False,
         special: bool = False,
     ) -> str:
         mood = self.emotion.get_mood()
         profile = self.memory.get_profile(user_id)
         parts = []
+        if presence_ctx:
+            parts.append(presence_ctx)
 
         if special:
             parts.append('这是你在意的人，语气放松直接，关心可以短一点，不要包装成客套话')
@@ -399,6 +426,9 @@ class AlivePersonaPlugin(Star):
         else:
             parts.append('这不是正式问答，允许只回应其中一小部分')
 
+        if light_reply:
+            parts.append('这轮只需要低存在感轻轻接一下，可以用“嗯”“好”“知道了”这类完整短回')
+
         if mood in ('sleepy', 'bored', 'upset'):
             parts.append('你现在不太想多说，回复可以更短')
         elif mood in ('excited', 'happy', 'content') and profile.get('message_count', 0) > 10:
@@ -412,6 +442,7 @@ class AlivePersonaPlugin(Star):
         mood_desc: str,
         user_desc: str,
         group_ctx: str,
+        presence_ctx: str,
         recent_context: str,
         reply_strategy: str,
         special_prompt: str,
@@ -422,6 +453,8 @@ class AlivePersonaPlugin(Star):
             sections.append(f'【当前心情】\n{mood_desc}')
         if group_ctx:
             sections.append(f'【当前场景】\n{group_ctx}')
+        if presence_ctx:
+            sections.append(f'【生活节律】\n{presence_ctx}')
         if user_desc:
             sections.append(f'【关于当前对话的人】\n{user_desc}')
         if special_prompt:

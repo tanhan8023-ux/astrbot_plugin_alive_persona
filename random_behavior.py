@@ -45,6 +45,7 @@ class RandomBehavior:
         mood: str,
         max_chars: int = 60,
         short_reply_rate: float = 0.06,
+        force_short_reply: bool = False,
         template_tail_filter: bool = True,
         allow_short_reply: bool = True,
     ) -> str:
@@ -53,6 +54,9 @@ class RandomBehavior:
             return reply
 
         reply = self.clean_reply(reply, template_tail_filter=template_tail_filter)
+
+        if force_short_reply and allow_short_reply and self._can_collapse_to_short(reply, mood, force=True):
+            return self._short_reply(mood)
 
         if allow_short_reply and self._can_collapse_to_short(reply, mood) and random.random() < short_reply_rate:
             return self._short_reply(mood)
@@ -202,8 +206,8 @@ class RandomBehavior:
         return ''.join(kept) or text
 
     @staticmethod
-    def _can_collapse_to_short(reply: str, mood: str) -> bool:
-        if len(reply) > 24:
+    def _can_collapse_to_short(reply: str, mood: str, force: bool = False) -> bool:
+        if len(reply) > (40 if force else 24):
             return False
         if re.search(r'url|api|/v1|密钥|模型|配置|错误|报错|怎么|如何|为什么', reply, re.I):
             return False

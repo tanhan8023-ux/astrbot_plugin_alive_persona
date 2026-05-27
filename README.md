@@ -24,11 +24,16 @@ data/persona.json
 建议把私人人设另存为类似下面的文件名：
 
 ```text
-data/persona_private.json
 data/persona_你的角色名.json
 ```
 
-这类文件已被 `.gitignore` 忽略，不会被提交到 GitHub。要让插件实际使用你的私人人设，可以把私人人设内容复制到本地的 `data/persona.json`，但不要提交这个改动。
+如果你想本地自动优先使用私人人设，请保存为：
+
+```text
+data/persona_private.json
+```
+
+插件会优先加载 `data/persona_private.json`，不存在时才加载公开 demo 的 `data/persona.json`。这类私人人设文件已被 `.gitignore` 忽略，不会被提交到 GitHub。
 
 ## 配置项
 
@@ -44,7 +49,15 @@ data/persona_你的角色名.json
 - `work_knowledge`: 可选知识库
 - `max_reply_chars`: 回复软长度限制
 - `short_reply_rate`: 低概率短回比例
+- `light_reply_rate`: 普通闲聊低存在感轻回比例
 - `recent_context_limit`: 注入最近聊天上下文条数
+
+## 活人感机制
+
+- 生活节律：根据清晨、白天、晚上、深夜调整回复状态
+- 低存在感轻回：非求助、非情绪消息可低概率压成短回
+- 陪伴记忆：记录疲惫、身体、心情等最近状态，并在24小时内自然影响回复
+- 私人人设保护：本地 `persona_private.json` 优先加载，公开仓库保持 demo 人设
 
 ## 隐私提醒
 

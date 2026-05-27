@@ -133,6 +133,8 @@ class MemorySystem:
             self.add_long_term(session_id, user_id, item['summary'], item['importance'])
             if item.get('note'):
                 self.add_note(user_id, item['note'])
+            if item.get('status_label'):
+                self.update_recent_status(user_id, item['status_label'], item.get('status_text') or message)
         return [item['summary'] for item in summaries]
 
     def extract_memory_summaries(self, nickname: str, message: str) -> list[dict]:
@@ -181,6 +183,8 @@ class MemorySystem:
                     'summary': f'{who}刚才说自己{label}不太好: {text}',
                     'importance': 0.65,
                     'note': f'最近{label}: {text}',
+                    'status_label': label,
+                    'status_text': text,
                 })
                 break
 
@@ -248,6 +252,7 @@ class MemorySystem:
                 'last_seen': time.time(),
                 'message_count': 0,
                 'first_seen': time.time(),
+                'recent_status': {},
             }
         p = self.user_profiles[user_id]
         p.setdefault('nickname', None)
@@ -257,6 +262,7 @@ class MemorySystem:
         p.setdefault('last_seen', time.time())
         p.setdefault('message_count', 0)
         p.setdefault('first_seen', time.time())
+        p.setdefault('recent_status', {})
         return p
 
     def update_profile(self, user_id: str, **kwargs):
@@ -283,6 +289,14 @@ class MemorySystem:
         p['notes'].append({'time': time.time(), 'content': note})
         if len(p['notes']) > 20:
             p['notes'].pop(0)
+        self._save()
+
+    def update_recent_status(self, user_id: str, label: str, text: str):
+        p = self.get_profile(user_id)
+        p['recent_status'][label] = {
+            'time': time.time(),
+            'content': self._compact_text(text, 80),
+        }
         self._save()
 
     def get_relation(self, user_id: str, is_special: bool = False) -> str:
@@ -331,6 +345,9 @@ class MemorySystem:
         recent_notes = p['notes'][-3:]
         if recent_notes:
             parts.append(f'你记得关于ta的一些事: {"；".join(n["content"] for n in recent_notes)}')
+        status_text = self.get_recent_status_text(user_id)
+        if status_text:
+            parts.append(f'ta最近的状态: {status_text}')
         if special_prompt:
             parts.append(f'特殊关系: {special_prompt}')
 
@@ -339,6 +356,15 @@ class MemorySystem:
     def get_recent_notes_text(self, user_id: str, limit: int = 3) -> str:
         notes = self.get_profile(user_id).get('notes', [])[-limit:]
         return '；'.join(n.get('content', '') for n in notes if n.get('content'))
+
+    def get_recent_status_text(self, user_id: str, max_age_hours: int = 24) -> str:
+        statuses = self.get_profile(user_id).get('recent_status', {})
+        now = time.time()
+        parts = []
+        for label, item in statuses.items():
+            if now - item.get('time', 0) <= max_age_hours * 3600:
+                parts.append(f'{label}: {item.get("content", "")}')
+        return '；'.join(parts)
 
     # ===== 持久化 =====
     def _save(self):

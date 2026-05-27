@@ -30,7 +30,9 @@ class PersonaEngine:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.persona_file = os.path.join(data_dir, 'persona.json')
+        self.private_persona_file = os.path.join(data_dir, 'persona_private.json')
         self.persona: dict = {}
+        self.loaded_from: str = self.persona_file
         self._load()
 
     def get_name(self) -> str:
@@ -172,13 +174,16 @@ class PersonaEngine:
         return '\n\n'.join(sections)
 
     def _load(self):
-        try:
-            if os.path.exists(self.persona_file):
-                with open(self.persona_file, 'r', encoding='utf-8') as f:
+        for load_file in (self.private_persona_file, self.persona_file):
+            if not os.path.exists(load_file):
+                continue
+            try:
+                with open(load_file, 'r', encoding='utf-8') as f:
                     self.persona = json.load(f)
+                self.loaded_from = load_file
                 return
-        except Exception:
-            pass
+            except Exception:
+                continue
         # 生成默认人设
         self.persona = dict(DEFAULT_PERSONA)
         os.makedirs(self.data_dir, exist_ok=True)
