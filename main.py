@@ -20,6 +20,7 @@ import logging
 
 from astrbot.api.star import Context, Star
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.agent.message import TextPart
 from astrbot.core.star.register import (
     register_command,
     register_on_llm_request,
@@ -88,110 +89,115 @@ class AlivePersonaPlugin(Star):
     @register_on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request):
         """在 LLM 请求发出前，注入活人感 system prompt"""
-        user_id = event.get_sender_id()
-        user_name = event.get_sender_name()
-        session_id = event.unified_msg_origin
-        message_text = event.get_message_str()
+        try:
+            user_id = event.get_sender_id()
+            user_name = event.get_sender_name()
+            session_id = event.unified_msg_origin
+            message_text = event.get_message_str()
 
-        # 更新记忆
-        self.memory.add_message(session_id, user_id, user_name, message_text, is_bot=False)
-        self.memory.update_profile(user_id, nickname=user_name)
+            # 更新记忆
+            self.memory.add_message(session_id, user_id, user_name, message_text, is_bot=False)
+            self.memory.update_profile(user_id, nickname=user_name)
 
-        special = self._match_special_user(user_id, user_name)
-        special_prompt = special_prompt_text(special)
+            special = self._match_special_user(user_id, user_name)
+            special_prompt = special_prompt_text(special)
 
-        # 更新情绪
-        relation = self.memory.get_relation(user_id, bool(special))
-        self.emotion.update_from_message(message_text, relation)
+            # 更新情绪
+            relation = self.memory.get_relation(user_id, bool(special))
+            self.emotion.update_from_message(message_text, relation)
 
-        # 更新好感度 (可通过 persona.json 关闭)
-        if self.enable_favorability:
-            self._process_favorability(user_id, message_text)
+            # 更新好感度 (可通过 persona.json 关闭)
+            if self.enable_favorability:
+                self._process_favorability(user_id, message_text)
 
-        # 检查昵称自我介绍
-        name_match = re.search(r'我(叫|是|名字是|名字叫)\s*([^，。！？、；,.!?;\s]{1,10})', message_text)
-        if name_match:
-            name = name_match.group(2).strip()
-            self.memory.update_profile(user_id, nickname=name)
+            # 检查昵称自我介绍
+            name_match = re.search(r'我(叫|是|名字是|名字叫)\s*([^，。！？、；,.!?;\s]{1,10})', message_text)
+            if name_match:
+                name = name_match.group(2).strip()
+                self.memory.update_profile(user_id, nickname=name)
 
-        # 检查是否需要记住
-        if self.memory.should_remember(message_text):
-            self.memory.remember_from_message(session_id, user_id, user_name, message_text)
+            # 检查是否需要记住
+            if self.memory.should_remember(message_text):
+                self.memory.remember_from_message(session_id, user_id, user_name, message_text)
 
-        # 构建活人感 system prompt
-        mood_desc = self.emotion.get_mood_description()
-        user_desc = self.memory.get_profile_description(user_id, special_prompt=special_prompt)
-        atmosphere = self.memory.get_session_atmosphere(session_id)
-        group_ctx = self._build_group_context(atmosphere)
-        recent_context = self.memory.get_recent_context(
-            session_id, self.behavior_config['recent_context_limit'], exclude_latest=True
-        )
-        reply_strategy = self._build_reply_strategy(
-            user_id=user_id,
-            message=message_text,
-            relation=relation,
-            atmosphere=atmosphere,
-            special=bool(special),
-        )
-        self.last_reply_strategy[session_id] = reply_strategy
+            mood_desc = self.emotion.get_mood_description()
+            user_desc = self.memory.get_profile_description(user_id, special_prompt=special_prompt)
+            atmosphere = self.memory.get_session_atmosphere(session_id)
+            group_ctx = self._build_group_context(atmosphere)
+            recent_context = self.memory.get_recent_context(
+                session_id, self.behavior_config['recent_context_limit'], exclude_latest=True
+            )
+            reply_strategy = self._build_reply_strategy(
+                user_id=user_id,
+                message=message_text,
+                relation=relation,
+                atmosphere=atmosphere,
+                special=bool(special),
+            )
+            self.last_reply_strategy[session_id] = reply_strategy
 
-        # 搜索相关记忆
-        keywords = self._extract_keywords(message_text)
-        relevant = self.memory.search_memories(keywords, user_id, limit=3)
-        memory_text = ''
-        if relevant:
+            # 搜索相关记忆
+            keywords = self._extract_keywords(message_text)
+            relevant = self.memory.search_memories(keywords, user_id, limit=3)
             memory_lines = [f'- {m["summary"]}' for m in relevant if m.get('score', 0) > 0.1]
-            if memory_lines:
-                memory_text = '\n\n【你的相关记忆（可以自然地引用，但不要刻意提起）】\n' + '\n'.join(memory_lines)
 
-        alive_prompt = self.persona.build_system_prompt(
-            mood_desc=mood_desc,
-            user_desc=user_desc,
-            group_ctx=group_ctx,
-            recent_context=recent_context,
-            reply_strategy=reply_strategy,
-            special_user_desc=special_prompt,
-        ) + memory_text
+            stable_prompt = self.persona.build_system_prompt(mood_desc='')
+            runtime_context = self._build_runtime_context(
+                mood_desc=mood_desc,
+                user_desc=user_desc,
+                group_ctx=group_ctx,
+                recent_context=recent_context,
+                reply_strategy=reply_strategy,
+                special_prompt=special_prompt,
+                memory_lines=memory_lines,
+            )
 
-        # 注入到 system prompt
-        if hasattr(request, 'system_prompt') and request.system_prompt:
-            request.system_prompt = alive_prompt + '\n\n---\n以下是补充设定（如果和上面冲突，以上面为准，不要因为下面的内容改变你的说话风格或重复回答）:\n' + request.system_prompt
-        elif hasattr(request, 'system_prompt'):
-            request.system_prompt = alive_prompt
+            # 稳定人设放 system prompt；每轮变化的状态/记忆按 AstrBot 推荐放临时 extra parts。
+            if hasattr(request, 'system_prompt') and request.system_prompt:
+                request.system_prompt = stable_prompt + '\n\n---\n以下是补充设定（如果和上面冲突，以上面为准）:\n' + request.system_prompt
+            elif hasattr(request, 'system_prompt'):
+                request.system_prompt = stable_prompt
+
+            self._append_runtime_context(request, runtime_context)
+        except Exception:
+            logger.exception("[AlivePersona] LLM 请求钩子失败，已跳过本轮活人感注入")
 
     @register_on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, response):
         """在 LLM 回复后，用随机行为修饰"""
-        if not hasattr(response, 'completion_text') or not response.completion_text:
-            return
+        try:
+            if not hasattr(response, 'completion_text') or not response.completion_text:
+                return
 
-        session_id = event.unified_msg_origin
-        mood = self.emotion.get_mood()
-        original = response.completion_text
+            session_id = event.unified_msg_origin
+            mood = self.emotion.get_mood()
+            original = response.completion_text
 
-        direct = self.random_behavior.before_reply(
-            session_id,
-            event.get_message_str(),
-            repeat_rate=self.behavior_config['repeat_rate'],
-        )
-        if direct:
-            response.completion_text = direct
-            return
+            direct = self.random_behavior.before_reply(
+                session_id,
+                event.get_message_str(),
+                repeat_rate=self.behavior_config['repeat_rate'],
+            )
+            if direct:
+                response.completion_text = direct
+                return
 
-        # 先去除 LLM 重复表达的句子
-        original = self.random_behavior.deduplicate(original)
+            # 先去除 LLM 重复表达的句子
+            original = self.random_behavior.deduplicate(original)
 
-        # 随机行为修饰（不再分条，只做文本修饰）
-        modified = self.random_behavior.modify_reply(
-            original,
-            mood,
-            max_chars=self.behavior_config['max_reply_chars'],
-            short_reply_rate=self.behavior_config['short_reply_rate'],
-            template_tail_filter=self.behavior_config['template_tail_filter'],
-            allow_short_reply=self.behavior_config['companion_mode'],
-        )
+            # 随机行为修饰（不再分条，只做文本修饰）
+            modified = self.random_behavior.modify_reply(
+                original,
+                mood,
+                max_chars=self.behavior_config['max_reply_chars'],
+                short_reply_rate=self.behavior_config['short_reply_rate'],
+                template_tail_filter=self.behavior_config['template_tail_filter'],
+                allow_short_reply=self.behavior_config['companion_mode'],
+            )
 
-        response.completion_text = modified
+            response.completion_text = modified
+        except Exception:
+            logger.exception("[AlivePersona] LLM 回复后处理失败，保留原始回复")
 
     @register_after_message_sent()
     async def after_sent(self, event: AstrMessageEvent):
@@ -400,3 +406,47 @@ class AlivePersonaPlugin(Star):
 
         parts.append(f'控制在{self.behavior_config["max_reply_chars"]}字以内，避免问句结尾')
         return '。'.join(parts)
+
+    @staticmethod
+    def _build_runtime_context(
+        mood_desc: str,
+        user_desc: str,
+        group_ctx: str,
+        recent_context: str,
+        reply_strategy: str,
+        special_prompt: str,
+        memory_lines: list[str],
+    ) -> str:
+        sections = []
+        if mood_desc:
+            sections.append(f'【当前心情】\n{mood_desc}')
+        if group_ctx:
+            sections.append(f'【当前场景】\n{group_ctx}')
+        if user_desc:
+            sections.append(f'【关于当前对话的人】\n{user_desc}')
+        if special_prompt:
+            sections.append(f'【当前这人的特殊关系】\n{special_prompt}')
+        if recent_context:
+            sections.append(
+                '【刚才的聊天上下文】\n'
+                '下面是最近几条消息。回复时接住当前上下文，不要把它们逐条复述出来。\n'
+                f'{recent_context}'
+            )
+        if memory_lines:
+            sections.append('【你的相关记忆（可以自然地引用，但不要刻意提起）】\n' + '\n'.join(memory_lines))
+        if reply_strategy:
+            sections.append(f'【这次回复策略】\n{reply_strategy}')
+        return '\n\n'.join(sections)
+
+    @staticmethod
+    def _append_runtime_context(request, runtime_context: str):
+        if not runtime_context:
+            return
+        if not hasattr(request, 'extra_user_content_parts'):
+            return
+        if request.extra_user_content_parts is None:
+            request.extra_user_content_parts = []
+        part = TextPart(text=runtime_context)
+        if hasattr(part, 'mark_as_temp'):
+            part = part.mark_as_temp()
+        request.extra_user_content_parts.append(part)
