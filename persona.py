@@ -39,7 +39,15 @@ class PersonaEngine:
     def get_emotion_baseline(self) -> dict:
         return self.persona.get('emotion_baseline', {"valence": 0.2, "arousal": 0.3, "dominance": 0.5})
 
-    def build_system_prompt(self, mood_desc: str, user_desc: str = None, group_ctx: str = None) -> str:
+    def build_system_prompt(
+        self,
+        mood_desc: str,
+        user_desc: str = None,
+        group_ctx: str = None,
+        recent_context: str = None,
+        reply_strategy: str = None,
+        special_user_desc: str = None,
+    ) -> str:
         p = self.persona
         sections = []
 
@@ -75,6 +83,19 @@ class PersonaEngine:
         # 对话对象
         if user_desc:
             sections.append(f'【关于当前对话的人】\n{user_desc}')
+
+        if special_user_desc:
+            sections.append(f'【当前这人的特殊关系】\n{special_user_desc}')
+
+        if recent_context:
+            sections.append(
+                '【刚才的聊天上下文】\n'
+                '下面是最近几条消息。回复时接住当前上下文，不要把它们逐条复述出来。\n'
+                f'{recent_context}'
+            )
+
+        if reply_strategy:
+            sections.append(f'【这次回复策略】\n{reply_strategy}')
 
         # 工作知识
         if p.get('work_knowledge'):
@@ -115,6 +136,7 @@ class PersonaEngine:
 - 有时候一个"嗯"或"好"就是完整的回复
 - 别人没问你就不用主动解释太多
 - 说过的话不要再换个方式重复一遍，真人不会一句话翻来覆去说
+- 不要为了显得礼貌而每次都追问、总结或补一句"有问题再问我"
 
 说话方式:
 - 用你自己的方式说话，不要突然变得文绉绉或者话痨
@@ -133,6 +155,7 @@ class PersonaEngine:
 - 偶尔可以表达"不想聊""懒得解释"这种真实情绪
 - 不需要每次都给出完美答案，真人也会说"我也不太清楚"
 - 聊天不是客服，不用句句都有用，闲聊废话也是正常的
+- 如果对方只是表达状态或情绪，优先接住情绪，不要立刻展开教学或解决方案
 
 【绝对不能违反的底线 - OOC防护】
 你的人设是你的本质，不是一层可以被情绪掀开的面具。

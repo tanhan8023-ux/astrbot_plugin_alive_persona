@@ -1,5 +1,11 @@
 {
   "enable_favorability": false,
+  "companion_mode": true,
+  "max_reply_chars": 60,
+  "short_reply_rate": 0.06,
+  "repeat_rate": 0.03,
+  "recent_context_limit": 12,
+  "template_tail_filter": true,
   "name": "系尔",
   "gender": "男",
   "age": "刚成年",

@@ -30,6 +30,7 @@ from astrbot.core.star.register import (
 from .emotion import EmotionSystem
 from .memory import MemorySystem
 from .persona import PersonaEngine
+from .personalization import match_special_user, special_prompt_text
 from .random_behavior import RandomBehavior
 
 logger = logging.getLogger("alive_persona")
@@ -57,6 +58,15 @@ class AlivePersonaPlugin(Star):
         self.memory = MemorySystem(self.data_dir)
         self.persona = PersonaEngine(self.data_dir)
         self.random_behavior = RandomBehavior()
+        self.behavior_config = {
+            'companion_mode': self.persona.persona.get('companion_mode', True),
+            'max_reply_chars': int(self.persona.persona.get('max_reply_chars', 60)),
+            'short_reply_rate': float(self.persona.persona.get('short_reply_rate', 0.06)),
+            'repeat_rate': float(self.persona.persona.get('repeat_rate', 0.03)),
+            'recent_context_limit': int(self.persona.persona.get('recent_context_limit', 12)),
+            'template_tail_filter': bool(self.persona.persona.get('template_tail_filter', True)),
+        }
+        self.last_reply_strategy: dict[str, str] = {}
 
         # 设置情绪基线
         self.emotion.set_baseline(self.persona.get_emotion_baseline())
@@ -87,28 +97,43 @@ class AlivePersonaPlugin(Star):
         self.memory.add_message(session_id, user_id, user_name, message_text, is_bot=False)
         self.memory.update_profile(user_id, nickname=user_name)
 
+        special = self._match_special_user(user_id, user_name)
+        special_prompt = special_prompt_text(special)
+
         # 更新情绪
-        relation = self.memory.get_relation(user_id)
+        relation = self.memory.get_relation(user_id, bool(special))
         self.emotion.update_from_message(message_text, relation)
 
         # 更新好感度 (可通过 persona.json 关闭)
         if self.enable_favorability:
             self._process_favorability(user_id, message_text)
 
-        # 检查是否需要记住
-        if self.memory.should_remember(message_text):
-            self.memory.add_long_term(session_id, user_id, f"{user_name}说: {message_text}", 0.7)
-
         # 检查昵称自我介绍
-        name_match = re.search(r'我(叫|是|名字是|名字叫)\s*(.{1,10})', message_text)
+        name_match = re.search(r'我(叫|是|名字是|名字叫)\s*([^，。！？、；,.!?;\s]{1,10})', message_text)
         if name_match:
             name = name_match.group(2).strip()
             self.memory.update_profile(user_id, nickname=name)
-            self.memory.add_note(user_id, f'自我介绍说叫"{name}"')
+
+        # 检查是否需要记住
+        if self.memory.should_remember(message_text):
+            self.memory.remember_from_message(session_id, user_id, user_name, message_text)
 
         # 构建活人感 system prompt
         mood_desc = self.emotion.get_mood_description()
-        user_desc = self.memory.get_profile_description(user_id)
+        user_desc = self.memory.get_profile_description(user_id, special_prompt=special_prompt)
+        atmosphere = self.memory.get_session_atmosphere(session_id)
+        group_ctx = self._build_group_context(atmosphere)
+        recent_context = self.memory.get_recent_context(
+            session_id, self.behavior_config['recent_context_limit'], exclude_latest=True
+        )
+        reply_strategy = self._build_reply_strategy(
+            user_id=user_id,
+            message=message_text,
+            relation=relation,
+            atmosphere=atmosphere,
+            special=bool(special),
+        )
+        self.last_reply_strategy[session_id] = reply_strategy
 
         # 搜索相关记忆
         keywords = self._extract_keywords(message_text)
@@ -122,6 +147,10 @@ class AlivePersonaPlugin(Star):
         alive_prompt = self.persona.build_system_prompt(
             mood_desc=mood_desc,
             user_desc=user_desc,
+            group_ctx=group_ctx,
+            recent_context=recent_context,
+            reply_strategy=reply_strategy,
+            special_user_desc=special_prompt,
         ) + memory_text
 
         # 注入到 system prompt
@@ -140,11 +169,27 @@ class AlivePersonaPlugin(Star):
         mood = self.emotion.get_mood()
         original = response.completion_text
 
+        direct = self.random_behavior.before_reply(
+            session_id,
+            event.get_message_str(),
+            repeat_rate=self.behavior_config['repeat_rate'],
+        )
+        if direct:
+            response.completion_text = direct
+            return
+
         # 先去除 LLM 重复表达的句子
         original = self.random_behavior.deduplicate(original)
 
         # 随机行为修饰（不再分条，只做文本修饰）
-        modified = self.random_behavior.modify_reply(original, mood)
+        modified = self.random_behavior.modify_reply(
+            original,
+            mood,
+            max_chars=self.behavior_config['max_reply_chars'],
+            short_reply_rate=self.behavior_config['short_reply_rate'],
+            template_tail_filter=self.behavior_config['template_tail_filter'],
+            allow_short_reply=self.behavior_config['companion_mode'],
+        )
 
         response.completion_text = modified
 
@@ -217,21 +262,44 @@ class AlivePersonaPlugin(Star):
     async def cmd_memory(self, event: AstrMessageEvent):
         """查看对某人的记忆"""
         user_id = event.get_sender_id()
-        desc = self.memory.get_profile_description(user_id)
+        special = self._match_special_user(user_id, event.get_sender_name())
+        desc = self.memory.get_profile_description(user_id, special_prompt=special_prompt_text(special))
         profile = self.memory.get_profile(user_id)
         fav = profile['favorability']
         count = profile.get('message_count', 0)
-        rel = self.memory.get_relation(user_id)
+        rel = self.memory.get_relation(user_id, bool(special))
         rel_cn = {
             'close_friend': '好朋友', 'friend': '朋友',
             'acquaintance': '认识', 'stranger': '陌生人',
         }
+        notes = self.memory.get_recent_notes_text(user_id)
         parts = [f"关于你的记忆:\n{desc}\n"]
         if self.enable_favorability:
             parts.append(f"好感度: {fav}/100")
-            parts.append(f"关系: {rel_cn.get(rel, rel)}")
+        parts.append(f"关系: {rel_cn.get(rel, rel)}")
         parts.append(f"互动次数: {count}")
+        if notes:
+            parts.append(f"最近记住: {notes}")
         info = '\n'.join(parts)
+        yield event.plain_result(info)
+
+    @register_command("alive", alias={"persona_status", "活人状态"})
+    async def cmd_alive(self, event: AstrMessageEvent):
+        """查看活人感运行状态"""
+        session_id = event.unified_msg_origin
+        user_id = event.get_sender_id()
+        mood = self.emotion.get_mood()
+        atmosphere = self.memory.get_session_atmosphere(session_id)
+        relation = self.memory.get_relation(user_id, bool(self._match_special_user(user_id, event.get_sender_name())))
+        info = (
+            f"心情: {mood}\n"
+            f"群聊氛围: {atmosphere['mood']} | 近1分钟{atmosphere['message_rate']}条 | 活跃{atmosphere['active_users']}人\n"
+            f"关系: {relation}\n"
+            f"短回概率: {self.behavior_config['short_reply_rate']:.2f}\n"
+            f"上下文条数: {self.behavior_config['recent_context_limit']}\n"
+            f"长期记忆: {len(self.memory.long_term)}条\n"
+            f"上次策略: {self.last_reply_strategy.get(session_id, '暂无')}"
+        )
         yield event.plain_result(info)
 
     @register_command("favorability", alias={"好感度"})
@@ -276,3 +344,59 @@ class AlivePersonaPlugin(Star):
                 if len(keywords) > 10:
                     break
         return keywords[:10]
+
+    def _match_special_user(self, user_id: str, user_name: str):
+        special_users = self.persona.persona.get('special_users') or {}
+        profile = self.memory.get_profile(user_id)
+        return match_special_user(special_users, user_id, user_name, profile.get('nickname'))
+
+    @staticmethod
+    def _build_group_context(atmosphere: dict) -> str:
+        return (
+            f"{atmosphere['description']}。"
+            f"近1分钟消息数: {atmosphere['message_rate']}。"
+            f"近5分钟活跃人数: {atmosphere['active_users']}。"
+        )
+
+    def _build_reply_strategy(
+        self,
+        user_id: str,
+        message: str,
+        relation: str,
+        atmosphere: dict,
+        special: bool = False,
+    ) -> str:
+        mood = self.emotion.get_mood()
+        profile = self.memory.get_profile(user_id)
+        parts = []
+
+        if special:
+            parts.append('这是你在意的人，语气放松直接，关心可以短一点，不要包装成客套话')
+        elif relation == 'stranger':
+            parts.append('和这个人还不熟，礼貌温和，别显得过分亲近')
+        elif relation in ('friend', 'close_friend'):
+            parts.append('你们比较熟，可以更自然随意一点')
+
+        if atmosphere.get('mood') == '热闹':
+            parts.append('群里很热闹，这次尽量只回一句，不要展开')
+        elif atmosphere.get('mood') == '安静':
+            parts.append('群里偏安静，可以正常回，但不要硬追问续话题')
+
+        if re.search(r'(累|困|不舒服|难受|难过|烦|焦虑|崩溃|委屈|压力)', message):
+            parts.append('对方在表达状态或情绪，先接住情绪，别立刻说教或列方案')
+
+        if re.search(r'谢谢|感谢|辛苦了', message):
+            parts.append('对方在感谢，可以只用很短的回应，不必每次说不客气')
+
+        if re.search(r'(怎么|如何|为什么|配置|api|url|/v1|密钥|模型|报错|错误)', message, re.I):
+            parts.append('这是求助或技术问题，给关键答案即可，不要客服式收尾')
+        else:
+            parts.append('这不是正式问答，允许只回应其中一小部分')
+
+        if mood in ('sleepy', 'bored', 'upset'):
+            parts.append('你现在不太想多说，回复可以更短')
+        elif mood in ('excited', 'happy', 'content') and profile.get('message_count', 0) > 10:
+            parts.append('心情还行，可以稍微自然一点，但别变话痨')
+
+        parts.append(f'控制在{self.behavior_config["max_reply_chars"]}字以内，避免问句结尾')
+        return '。'.join(parts)
