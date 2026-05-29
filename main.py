@@ -32,6 +32,7 @@ from .emotion import EmotionSystem
 from .living_state import LivingState
 from .memory import MemorySystem
 from .persona import PersonaEngine
+from .persona_style import PersonaStyleState
 from .personalization import match_special_user, special_prompt_text
 from .random_behavior import RandomBehavior
 
@@ -60,12 +61,20 @@ class AlivePersonaPlugin(Star):
         self.memory = MemorySystem(self.data_dir)
         self.persona = PersonaEngine(self.data_dir)
         self.living_state = LivingState()
+        self.persona_style = PersonaStyleState(
+            trait_anchor_rate=float(self.persona.persona.get('trait_anchor_rate', 0.35)),
+            identity_mention_policy=self.persona.persona.get('identity_mention_policy', 'rare'),
+        )
         self.random_behavior = RandomBehavior()
         self.behavior_config = {
             'companion_mode': self.persona.persona.get('companion_mode', True),
             'max_reply_chars': int(self.persona.persona.get('max_reply_chars', 60)),
             'short_reply_rate': float(self.persona.persona.get('short_reply_rate', 0.06)),
             'light_reply_rate': float(self.persona.persona.get('light_reply_rate', 0.12)),
+            'persona_flexibility': float(self.persona.persona.get('persona_flexibility', 0.25)),
+            'trait_anchor_rate': float(self.persona.persona.get('trait_anchor_rate', 0.35)),
+            'catchphrase_cooldown': bool(self.persona.persona.get('catchphrase_cooldown', True)),
+            'identity_mention_policy': self.persona.persona.get('identity_mention_policy', 'rare'),
             'repeat_rate': float(self.persona.persona.get('repeat_rate', 0.03)),
             'recent_context_limit': int(self.persona.persona.get('recent_context_limit', 12)),
             'template_tail_filter': bool(self.persona.persona.get('template_tail_filter', True)),
@@ -143,6 +152,13 @@ class AlivePersonaPlugin(Star):
                 light_reply_rate=self.behavior_config['light_reply_rate'],
             )
             self.force_light_reply[session_id] = light_reply
+            style_decision = self.persona_style.decide(
+                session_id=session_id,
+                message=message_text,
+                relation=relation,
+                atmosphere=atmosphere,
+                special=bool(special),
+            )
             reply_strategy = self._build_reply_strategy(
                 user_id=user_id,
                 message=message_text,
@@ -150,6 +166,7 @@ class AlivePersonaPlugin(Star):
                 atmosphere=atmosphere,
                 presence_ctx=presence_ctx,
                 light_reply=light_reply,
+                style_decision=style_decision,
                 special=bool(special),
             )
             self.last_reply_strategy[session_id] = reply_strategy
@@ -213,7 +230,17 @@ class AlivePersonaPlugin(Star):
                 force_short_reply=self.force_light_reply.pop(session_id, False),
                 template_tail_filter=self.behavior_config['template_tail_filter'],
                 allow_short_reply=self.behavior_config['companion_mode'],
+                catchphrases=self.persona.persona.get('catchphrases') or [],
+                catchphrase_on_cooldown=(
+                    self.persona_style.catchphrase_on_cooldown(session_id)
+                    if self.behavior_config['catchphrase_cooldown']
+                    else False
+                ),
             )
+            if self.behavior_config['catchphrase_cooldown'] and self.random_behavior.contains_catchphrase(
+                modified, self.persona.persona.get('catchphrases') or []
+            ):
+                self.persona_style.mark_catchphrase(session_id)
 
             response.completion_text = modified
         except Exception:
@@ -318,11 +345,15 @@ class AlivePersonaPlugin(Star):
         rhythm = self.living_state.get_rhythm()
         atmosphere = self.memory.get_session_atmosphere(session_id)
         relation = self.memory.get_relation(user_id, bool(self._match_special_user(user_id, event.get_sender_name())))
+        style_mode = self.persona_style.get_last_mode(session_id)
         info = (
             f"心情: {mood}\n"
             f"生活节律: {rhythm['period']}\n"
             f"群聊氛围: {atmosphere['mood']} | 近1分钟{atmosphere['message_rate']}条 | 活跃{atmosphere['active_users']}人\n"
             f"关系: {relation}\n"
+            f"人设模式: {style_mode}\n"
+            f"显性人设率: {self.behavior_config['trait_anchor_rate']:.2f}\n"
+            f"口头禅冷却: {'是' if self.persona_style.catchphrase_on_cooldown(session_id) else '否'}\n"
             f"短回概率: {self.behavior_config['short_reply_rate']:.2f}\n"
             f"轻回概率: {self.behavior_config['light_reply_rate']:.2f}\n"
             f"上下文条数: {self.behavior_config['recent_context_limit']}\n"
@@ -395,6 +426,7 @@ class AlivePersonaPlugin(Star):
         atmosphere: dict,
         presence_ctx: str = '',
         light_reply: bool = False,
+        style_decision: dict = None,
         special: bool = False,
     ) -> str:
         mood = self.emotion.get_mood()
@@ -428,6 +460,17 @@ class AlivePersonaPlugin(Star):
 
         if light_reply:
             parts.append('这轮只需要低存在感轻轻接一下，可以用“嗯”“好”“知道了”这类完整短回')
+
+        if style_decision:
+            parts.append(f'人设贴合模式: {style_decision["mode"]}')
+            if style_decision.get('anchor'):
+                parts.append('这轮可以轻微体现人设特征，但只放在语气、取舍或一两个用词里，不要解释设定')
+            else:
+                parts.append('这轮保持自然低显性，不要刻意展示身份、背景、口头禅或性格标签')
+            if not style_decision.get('allow_identity_mention'):
+                parts.append('除非对方直接问身份，否则不要主动提身份背景')
+            if style_decision.get('catchphrase_on_cooldown'):
+                parts.append('刚用过常用短语，这轮换一种说法')
 
         if mood in ('sleepy', 'bored', 'upset'):
             parts.append('你现在不太想多说，回复可以更短')

@@ -48,12 +48,16 @@ class RandomBehavior:
         force_short_reply: bool = False,
         template_tail_filter: bool = True,
         allow_short_reply: bool = True,
+        catchphrases: list[str] = None,
+        catchphrase_on_cooldown: bool = False,
     ) -> str:
         """对 AI 回复进行轻量修饰，保持克制，不加戏。"""
         if not reply or not reply.strip():
             return reply
 
         reply = self.clean_reply(reply, template_tail_filter=template_tail_filter)
+        if catchphrase_on_cooldown:
+            reply = self.reduce_catchphrase(reply, catchphrases or [])
 
         if force_short_reply and allow_short_reply and self._can_collapse_to_short(reply, mood, force=True):
             return self._short_reply(mood)
@@ -70,6 +74,23 @@ class RandomBehavior:
         reply = self._reduce_question_tail(reply)
         reply = self.soft_limit(reply, max_chars)
         return reply.strip()
+
+    @staticmethod
+    def contains_catchphrase(text: str, catchphrases: list[str]) -> bool:
+        if not text or not catchphrases:
+            return False
+        return any(p and p in text for p in catchphrases)
+
+    @staticmethod
+    def reduce_catchphrase(text: str, catchphrases: list[str]) -> str:
+        if not text or not catchphrases:
+            return text
+        result = text.strip()
+        for phrase in sorted([p for p in catchphrases if p], key=len, reverse=True):
+            escaped = re.escape(phrase)
+            result = re.sub(rf'^{escaped}[，,。.\s]*', '', result)
+            result = re.sub(rf'[，,。.\s]*{escaped}$', '', result)
+        return result.strip() or text
 
     @classmethod
     def clean_reply(cls, text: str, template_tail_filter: bool = True) -> str:

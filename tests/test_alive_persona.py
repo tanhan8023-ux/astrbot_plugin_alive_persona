@@ -4,6 +4,7 @@ import json
 from living_state import LivingState
 from memory import MemorySystem
 from persona import PersonaEngine
+from persona_style import PersonaStyleState
 from personalization import match_special_user, special_prompt_text
 from random_behavior import RandomBehavior
 
@@ -92,3 +93,30 @@ def test_living_state_light_reply_skips_requests_and_special_users():
     assert not state.should_light_reply("怎么配置api", "stranger", atmosphere, False, 1.0)
     assert not state.should_light_reply("随便说句话", "stranger", atmosphere, True, 1.0)
     assert state.should_light_reply("随便说句话", "stranger", atmosphere, False, 1.0)
+
+
+def test_persona_style_keeps_technical_replies_low_anchor():
+    style = PersonaStyleState(trait_anchor_rate=0.0)
+    decision = style.decide("s", "api怎么配置", "stranger", {"mood": "正常"}, False)
+
+    assert decision["intent"] == "technical"
+    assert decision["mode"] == "答题优先，低显性人设"
+    assert not decision["anchor"]
+
+
+def test_persona_style_allows_identity_only_when_asked():
+    style = PersonaStyleState(trait_anchor_rate=1.0, identity_mention_policy="never")
+
+    asked = style.decide("s1", "你是谁", "stranger", {"mood": "正常"}, False)
+    assert asked["allow_identity_mention"]
+
+    not_asked = style.decide("s2", "今天天气不错", "stranger", {"mood": "正常"}, False)
+    assert not not_asked["allow_identity_mention"]
+
+
+def test_catchphrase_cooldown_removes_reused_phrase_edges():
+    text = RandomBehavior.reduce_catchphrase("嗯，好呀", ["嗯"])
+
+    assert text == "好呀"
+
+    assert RandomBehavior.contains_catchphrase("嗯，好呀", ["嗯"])

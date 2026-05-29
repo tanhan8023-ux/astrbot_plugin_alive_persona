@@ -50,12 +50,18 @@ data/persona_private.json
 - `max_reply_chars`: 回复软长度限制
 - `short_reply_rate`: 低概率短回比例
 - `light_reply_rate`: 普通闲聊低存在感轻回比例
+- `persona_flexibility`: 人设表达弹性，默认 `0.25`
+- `trait_anchor_rate`: 显性体现人设特征的概率，默认 `0.35`
+- `catchphrase_cooldown`: 是否避免连续复用口头禅
+- `identity_mention_policy`: 身份背景主动提及策略，默认 `rare`
 - `recent_context_limit`: 注入最近聊天上下文条数
 
 ## 活人感机制
 
 - 生活节律：根据清晨、白天、晚上、深夜调整回复状态
 - 低存在感轻回：非求助、非情绪消息可低概率压成短回
+- 人设弹性：核心身份稳定，但不是每句话都展示设定
+- 口头禅冷却：避免连续多轮机械复用常用短语
 - 陪伴记忆：记录疲惫、身体、心情等最近状态，并在24小时内自然影响回复
 - 私人人设保护：本地 `persona_private.json` 优先加载，公开仓库保持 demo 人设
 
