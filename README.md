@@ -1,43 +1,34 @@
 # astrbot_plugin_alive_persona
 
-AstrBot 活人感人设插件 demo 版。
-
-这个仓库里的 `data/persona.json` 是公开演示人设，不包含私人角色设定。你可以直接安装使用，也可以把它复制一份改成自己的角色。
+AstrBot 活人感人设插件，当前默认人设为 **系尔**。
 
 ## 功能
 
 - 在 LLM 请求前注入人设、情绪、上下文、记忆和回复策略
 - 记录短期聊天上下文，让 bot 能接住前文
 - 记录偏好、状态、感谢、道歉、约定等陪伴型记忆
-- 根据心情、熟悉度和群聊氛围调整回复策略
+- 根据心情、熟悉度、生活节律和群聊氛围调整回复策略
+- 支持“贴人设但不死板”的弹性人设锚点
 - 清理重复表达、客服式尾巴和过长回复
 - 支持 `/persona`、`/mood`、`/memory`、`/alive`
 
-## 自定义人设
+## 人设文件
 
-公开 demo 人设在：
+默认人设在：
 
 ```text
 data/persona.json
 ```
 
-建议把私人人设另存为类似下面的文件名：
-
-```text
-data/persona_你的角色名.json
-```
-
-如果你想本地自动优先使用私人人设，请保存为：
+如果你在本地放了：
 
 ```text
 data/persona_private.json
 ```
 
-插件会优先加载 `data/persona_private.json`，不存在时才加载公开 demo 的 `data/persona.json`。这类私人人设文件已被 `.gitignore` 忽略，不会被提交到 GitHub。
+插件会优先读取 `persona_private.json`，没有这个文件才读取 `persona.json`。
 
-## 配置项
-
-`data/persona.json` 中常用字段：
+## 常用配置
 
 - `name`: 角色名字
 - `identity`: 角色身份
@@ -50,10 +41,10 @@ data/persona_private.json
 - `max_reply_chars`: 回复软长度限制
 - `short_reply_rate`: 低概率短回比例
 - `light_reply_rate`: 普通闲聊低存在感轻回比例
-- `persona_flexibility`: 人设表达弹性，默认 `0.25`
-- `trait_anchor_rate`: 显性体现人设特征的概率，默认 `0.35`
+- `persona_flexibility`: 人设表达弹性
+- `trait_anchor_rate`: 显性体现人设特征的概率
 - `catchphrase_cooldown`: 是否避免连续复用口头禅
-- `identity_mention_policy`: 身份背景主动提及策略，默认 `rare`
+- `identity_mention_policy`: 身份背景主动提及策略
 - `recent_context_limit`: 注入最近聊天上下文条数
 
 ## 活人感机制
@@ -63,14 +54,3 @@ data/persona_private.json
 - 人设弹性：核心身份稳定，但不是每句话都展示设定
 - 口头禅冷却：避免连续多轮机械复用常用短语
 - 陪伴记忆：记录疲惫、身体、心情等最近状态，并在24小时内自然影响回复
-- 私人人设保护：本地 `persona_private.json` 优先加载，公开仓库保持 demo 人设
-
-## 隐私提醒
-
-提交或分享前检查：
-
-```bash
-git status --short
-```
-
-不要提交包含真实角色、真实用户关系、私密知识库或聊天记忆的文件。`data/memory.json` 和 `data/persona_*.json` 默认已忽略。
