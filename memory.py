@@ -115,8 +115,18 @@ class MemorySystem:
 
     # ===== 长期记忆 =====
     def add_long_term(self, session_id: str, user_id: str, summary: str, importance: float = 0.5):
+        # 同一用户的同一事实短时间内重复出现时更新原记录，不无限堆叠。
+        now = time.time()
+        for item in reversed(self.long_term):
+            if item.get('user_id') == user_id and item.get('summary') == summary:
+                age = now - item.get('time', 0)
+                if age <= 7 * 86400:
+                    item['time'] = now
+                    item['importance'] = max(item.get('importance', 0.5), importance)
+                    self._save()
+                    return
         self.long_term.append({
-            'time': time.time(),
+            'time': now,
             'session_id': session_id,
             'user_id': user_id,
             'summary': summary,
@@ -178,7 +188,8 @@ class MemorySystem:
             })
 
         for pattern, label in STATUS_PATTERNS:
-            if pattern.search(message):
+            # 只有出现明确的第一人称时才记录为用户自己的状态。
+            if '我' in message and pattern.search(message):
                 summaries.append({
                     'summary': f'{who}刚才说自己{label}不太好: {text}',
                     'importance': 0.65,
@@ -286,6 +297,10 @@ class MemorySystem:
 
     def add_note(self, user_id: str, note: str):
         p = self.get_profile(user_id)
+        if not note:
+            return
+        if any(n.get('content') == note for n in p['notes'][-5:]):
+            return
         p['notes'].append({'time': time.time(), 'content': note})
         if len(p['notes']) > 20:
             p['notes'].pop(0)
@@ -293,9 +308,13 @@ class MemorySystem:
 
     def update_recent_status(self, user_id: str, label: str, text: str):
         p = self.get_profile(user_id)
+        content = self._compact_text(text, 80)
+        old = p['recent_status'].get(label, {})
+        if old.get('content') == content and time.time() - old.get('time', 0) < 6 * 3600:
+            return
         p['recent_status'][label] = {
             'time': time.time(),
-            'content': self._compact_text(text, 80),
+            'content': content,
         }
         self._save()
 
@@ -366,12 +385,26 @@ class MemorySystem:
                 parts.append(f'{label}: {item.get("content", "")}')
         return '；'.join(parts)
 
+    def forget_user(self, user_id: str):
+        """删除一个用户的长期记忆、画像和短期消息。"""
+        self.long_term = [m for m in self.long_term if m.get('user_id') != user_id]
+        self.user_profiles.pop(user_id, None)
+        for session_id, messages in list(self.short_term.items()):
+            kept = [m for m in messages if m.get('user_id') != user_id]
+            if kept:
+                self.short_term[session_id] = kept
+            else:
+                self.short_term.pop(session_id, None)
+        self._save()
+
     # ===== 持久化 =====
     def _save(self):
         try:
             data = {'long_term': self.long_term, 'user_profiles': self.user_profiles}
-            with open(self.memory_file, 'w', encoding='utf-8') as f:
+            temp_file = self.memory_file + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_file, self.memory_file)
         except Exception as e:
             print(f'[Memory] 保存失败: {e}')
 
