@@ -5,6 +5,17 @@
 """
 import os, json
 
+SHARED_PERSONA_FIELDS = (
+    'name',
+    'identity',
+    'background',
+    'description',
+    'systemPrompt',
+    'customPrompt',
+    'firstMessage',
+)
+
+
 DEFAULT_PERSONA = {
     "enable_favorability": False,
     "companion_mode": True,
@@ -130,19 +141,51 @@ DEFAULT_PERSONA = {
 
 
 class PersonaEngine:
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str, config: dict | None = None):
         self.data_dir = data_dir
         self.persona_file = os.path.join(data_dir, 'persona.json')
         self.private_persona_file = os.path.join(data_dir, 'persona_private.json')
+        self.configured_persona_file = self._resolve_configured_file(config or {})
         self.persona: dict = {}
+        self.shared_persona: dict | None = None
         self.loaded_from: str = self.persona_file
         self._load()
 
+    def _resolve_configured_file(self, config: dict) -> str | None:
+        """Resolve an optional profile filename without allowing path traversal."""
+        configured = config.get('persona_file') or os.getenv('ALIVE_PERSONA_FILE')
+        if not configured:
+            return None
+        configured = os.path.basename(str(configured).strip())
+        if not configured.lower().endswith('.json'):
+            configured += '.json'
+        return os.path.join(self.data_dir, configured)
+
     def get_name(self) -> str:
-        return self.persona.get('name', '系尔')
+        return self._effective_persona().get('name') or self.persona.get('name', '系尔')
 
     def get_emotion_baseline(self) -> dict:
         return self.persona.get('emotion_baseline', {"valence": 0.2, "arousal": 0.3, "dominance": 0.5})
+
+    def export_base_persona(self) -> dict:
+        return {field: str(self.persona.get(field) or '') for field in SHARED_PERSONA_FIELDS}
+
+    def export_shared_persona(self) -> dict:
+        source = self.shared_persona if self.shared_persona is not None else self.export_base_persona()
+        return {field: str(source.get(field) or '') for field in SHARED_PERSONA_FIELDS}
+
+    def set_shared_persona(self, persona: dict | None):
+        if not isinstance(persona, dict):
+            self.shared_persona = None
+            return
+        self.shared_persona = {field: str(persona.get(field) or '') for field in SHARED_PERSONA_FIELDS}
+
+    def _effective_persona(self) -> dict:
+        if self.shared_persona is None:
+            return self.persona
+        merged = dict(self.persona)
+        merged.update(self.shared_persona)
+        return merged
 
     def build_system_prompt(
         self,
@@ -153,7 +196,7 @@ class PersonaEngine:
         reply_strategy: str = None,
         special_user_desc: str = None,
     ) -> str:
-        p = self.persona
+        p = self._effective_persona()
         sections = []
         flexibility = float(p.get('persona_flexibility', 0.25))
         trait_anchor_rate = float(p.get('trait_anchor_rate', 0.35))
@@ -166,7 +209,20 @@ class PersonaEngine:
         if p.get('identity'): lines.append(f'身份: {p["identity"]}')
         if p.get('background'): lines.append(f'背景: {p["background"]}')
         lines.append(f'身份提及策略: {identity_policy}。除非对方问到身份/背景，否则不要主动提这些信息。')
+        if p.get('description'):
+            lines.append(f'人物描述: {p["description"]}')
         sections.append('\n'.join(lines))
+
+        shared_instructions = []
+        if p.get('systemPrompt'):
+            shared_instructions.append(str(p['systemPrompt']).strip())
+        if p.get('customPrompt'):
+            shared_instructions.append(str(p['customPrompt']).strip())
+        if shared_instructions:
+            sections.append(
+                '【共享核心指令】\n'
+                + '\n'.join(item for item in shared_instructions if item)
+            )
 
         # 性格
         lines = ['【稳定倾向】']
@@ -292,7 +348,16 @@ class PersonaEngine:
         return '\n\n'.join(sections)
 
     def _load(self):
-        for load_file in (self.private_persona_file, self.persona_file):
+        candidates = [
+            self.configured_persona_file,
+            self.private_persona_file,
+            self.persona_file,
+        ]
+        seen = set()
+        for load_file in candidates:
+            if not load_file or load_file in seen:
+                continue
+            seen.add(load_file)
             if not os.path.exists(load_file):
                 continue
             try:

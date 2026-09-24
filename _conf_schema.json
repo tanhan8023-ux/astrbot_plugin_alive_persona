@@ -1,0 +1,20 @@
+{
+  "persona_file": {
+    "description": "人设文件名",
+    "type": "string",
+    "default": "",
+    "hint": "可填写 data 目录中的 JSON 文件名；留空时仍按私有人设、默认人设的优先级加载。"
+  },
+  "bridge_enabled": {
+    "description": "启用蛇蛇机人设与记忆互通",
+    "type": "bool",
+    "default": false,
+    "hint": "仅建议在局域网、手机热点或电脑热点内启用，不要把 6185 端口暴露到公网。"
+  },
+  "bridge_allowed_user_id": {
+    "description": "允许同步的本人 QQ ID",
+    "type": "string",
+    "default": "",
+    "hint": "只同步这个 QQ 用户与当前插件角色的人设、长期记忆和近期上下文。"
+  }
+}

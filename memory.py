@@ -9,7 +9,11 @@ import json
 import math
 import os
 import re
+import shutil
+import threading
 import time
+import uuid
+from datetime import datetime, timezone
 
 
 IMPORTANT_PATTERNS = [
@@ -39,6 +43,8 @@ class MemorySystem:
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         self.memory_file = os.path.join(data_dir, 'memory.json')
+        self.legacy_backup_file = self.memory_file + '.legacy.bak'
+        self._lock = threading.RLock()
         self.short_term: dict[str, list] = {}
         self.short_term_limit = 50
         self.long_term: list[dict] = []
@@ -47,21 +53,23 @@ class MemorySystem:
 
     # ===== 短期记忆 =====
     def add_message(self, session_id: str, user_id: str, nickname: str, content: str, is_bot: bool = False):
-        if session_id not in self.short_term:
-            self.short_term[session_id] = []
-        msgs = self.short_term[session_id]
-        msgs.append({
-            'time': time.time(),
-            'user_id': user_id,
-            'nickname': nickname,
-            'content': content,
-            'is_bot': is_bot,
-        })
-        while len(msgs) > self.short_term_limit:
-            msgs.pop(0)
+        with self._lock:
+            if session_id not in self.short_term:
+                self.short_term[session_id] = []
+            msgs = self.short_term[session_id]
+            msgs.append({
+                'time': time.time(),
+                'user_id': str(user_id),
+                'nickname': nickname,
+                'content': content,
+                'is_bot': is_bot,
+            })
+            while len(msgs) > self.short_term_limit:
+                msgs.pop(0)
 
     def get_recent(self, session_id: str, limit: int = 20) -> list[dict]:
-        return (self.short_term.get(session_id) or [])[-limit:]
+        with self._lock:
+            return [dict(item) for item in (self.short_term.get(session_id) or [])[-limit:]]
 
     def get_recent_context(self, session_id: str, limit: int = 12, exclude_latest: bool = False) -> str:
         messages = self.get_recent(session_id, limit)
@@ -114,28 +122,144 @@ class MemorySystem:
         }
 
     # ===== 长期记忆 =====
-    def add_long_term(self, session_id: str, user_id: str, summary: str, importance: float = 0.5):
-        # 同一用户的同一事实短时间内重复出现时更新原记录，不无限堆叠。
+    def add_long_term(
+        self,
+        session_id: str,
+        user_id: str,
+        summary: str,
+        importance: float = 0.5,
+        *,
+        keywords: list[str] | None = None,
+        source: str = 'astrbot',
+    ) -> dict | None:
+        """Add or refresh a durable memory and return the canonical record."""
+        summary = self._compact_text(summary, 1000)
+        if not summary:
+            return None
+        user_id = str(user_id)
         now = time.time()
-        for item in reversed(self.long_term):
-            if item.get('user_id') == user_id and item.get('summary') == summary:
-                age = now - item.get('time', 0)
-                if age <= 7 * 86400:
+        now_iso = self._iso_from_epoch(now)
+        normalized = self._normalize_memory_text(summary)
+        with self._lock:
+            for item in reversed(self.long_term):
+                if (
+                    str(item.get('user_id')) == user_id
+                    and self._normalize_memory_text(item.get('summary', '')) == normalized
+                ):
                     item['time'] = now
-                    item['importance'] = max(item.get('importance', 0.5), importance)
+                    item['updated_at'] = now_iso
+                    item['importance'] = max(float(item.get('importance', 0.5)), float(importance))
+                    item['keywords'] = self._merge_keywords(item.get('keywords'), keywords)
+                    item['revision'] = max(1, int(item.get('revision', 1))) + 1
+                    item['source'] = self._normalize_source(source, 'astrbot')
                     self._save()
-                    return
-        self.long_term.append({
-            'time': now,
-            'session_id': session_id,
-            'user_id': user_id,
-            'summary': summary,
-            'importance': importance,
-        })
-        if len(self.long_term) > 500:
-            self.long_term.sort(key=lambda m: m['importance'], reverse=True)
-            self.long_term = self.long_term[:400]
-        self._save()
+                    return dict(item)
+
+            record = {
+                'id': str(uuid.uuid4()),
+                'time': now,
+                'created_at': now_iso,
+                'updated_at': now_iso,
+                'session_id': session_id,
+                'user_id': user_id,
+                'summary': summary,
+                'importance': max(0.0, min(1.0, float(importance))),
+                'keywords': self._merge_keywords([], keywords),
+                'revision': 1,
+                'source': self._normalize_source(source, 'astrbot'),
+            }
+            self.long_term.append(record)
+            if len(self.long_term) > 500:
+                self.long_term.sort(key=lambda m: float(m.get('importance', 0.5)), reverse=True)
+                self.long_term = self.long_term[:400]
+            self._save()
+            return dict(record)
+
+    def list_shared(self, user_id: str) -> list[dict]:
+        """Return bridge-safe records for one user only."""
+        user_id = str(user_id)
+        with self._lock:
+            return [
+                self._record_to_shared(item)
+                for item in self.long_term
+                if str(item.get('user_id')) == user_id
+            ]
+
+    def upsert_shared(self, user_id: str, record: dict) -> tuple[dict | None, bool]:
+        """Merge a phone-side record by UUID, then by normalized content."""
+        if not isinstance(record, dict):
+            return None, False
+        user_id = str(user_id)
+        incoming_id = str(record.get('id') or '').strip() or str(uuid.uuid4())
+        content = self._compact_text(record.get('content') or record.get('summary') or '', 1000)
+        if not content:
+            return None, False
+        normalized = self._normalize_memory_text(content)
+        created_iso = self._normalize_iso(record.get('createdAt') or record.get('created_at'))
+        updated_iso = self._normalize_iso(record.get('updatedAt') or record.get('updated_at'))
+        if not created_iso:
+            created_iso = self._iso_from_epoch(time.time())
+        if not updated_iso:
+            updated_iso = created_iso
+        importance = max(0.0, min(1.0, float(record.get('importance', 0.5))))
+        incoming_revision = max(1, int(record.get('revision', 1)))
+        incoming_source = self._normalize_source(record.get('source'), 'sheshe')
+        incoming_keywords = self._merge_keywords([], record.get('keywords'))
+
+        with self._lock:
+            existing = next((m for m in self.long_term if str(m.get('user_id')) == user_id and str(m.get('id')) == incoming_id), None)
+            if existing is None:
+                existing = next((
+                    m for m in self.long_term
+                    if str(m.get('user_id')) == user_id
+                    and self._normalize_memory_text(m.get('summary', '')) == normalized
+                ), None)
+
+            if existing is None:
+                item = {
+                    'id': incoming_id,
+                    'time': self._epoch_from_iso(updated_iso),
+                    'created_at': created_iso,
+                    'updated_at': updated_iso,
+                    'session_id': 'sheshe_bridge',
+                    'user_id': user_id,
+                    'summary': content,
+                    'importance': importance,
+                    'keywords': incoming_keywords,
+                    'revision': incoming_revision,
+                    'source': incoming_source,
+                }
+                self.long_term.append(item)
+                self._save()
+                return self._record_to_shared(item), True
+
+            before = json.dumps(existing, ensure_ascii=False, sort_keys=True)
+            existing_revision = max(1, int(existing.get('revision', 1)))
+            if incoming_revision >= existing_revision:
+                existing['summary'] = content
+                existing['updated_at'] = updated_iso
+                existing['time'] = max(float(existing.get('time', 0)), self._epoch_from_iso(updated_iso))
+                existing['source'] = incoming_source
+            existing.setdefault('created_at', created_iso)
+            existing['importance'] = max(float(existing.get('importance', 0.5)), importance)
+            existing['keywords'] = self._merge_keywords(existing.get('keywords'), incoming_keywords)
+            existing['revision'] = max(existing_revision, incoming_revision)
+            after = json.dumps(existing, ensure_ascii=False, sort_keys=True)
+            changed = before != after
+            if changed:
+                self._save()
+            return self._record_to_shared(existing), changed
+
+    def delete_shared(self, user_id: str, memory_id: str) -> dict | None:
+        user_id = str(user_id)
+        memory_id = str(memory_id)
+        with self._lock:
+            for index, item in enumerate(self.long_term):
+                if str(item.get('user_id')) == user_id and str(item.get('id')) == memory_id:
+                    removed = self.long_term.pop(index)
+                    self._save()
+                    return self._record_to_shared(removed)
+        return None
 
     def remember_from_message(self, session_id: str, user_id: str, nickname: str, message: str) -> list[str]:
         summaries = self.extract_memory_summaries(nickname, message)
@@ -218,7 +342,7 @@ class MemorySystem:
                 'importance': 0.9,
                 'note': f'希望记住: {text}',
             })
-        elif re.search(r'(以后|下次|明天|后天).{0,10}(要|得|必须)', message):
+        if re.search(r'(以后|下次|明天|后天).{0,10}(要|得|必须)', message):
             summaries.append({
                 'summary': f'{who}提到一个之后要注意的事: {text}',
                 'importance': 0.75,
@@ -385,38 +509,144 @@ class MemorySystem:
                 parts.append(f'{label}: {item.get("content", "")}')
         return '；'.join(parts)
 
-    def forget_user(self, user_id: str):
-        """删除一个用户的长期记忆、画像和短期消息。"""
-        self.long_term = [m for m in self.long_term if m.get('user_id') != user_id]
-        self.user_profiles.pop(user_id, None)
-        for session_id, messages in list(self.short_term.items()):
-            kept = [m for m in messages if m.get('user_id') != user_id]
-            if kept:
-                self.short_term[session_id] = kept
-            else:
-                self.short_term.pop(session_id, None)
-        self._save()
+    def forget_user(self, user_id: str) -> list[str]:
+        """删除一个用户的长期记忆、画像和短期消息，并返回被删 UUID。"""
+        user_id = str(user_id)
+        with self._lock:
+            removed_ids = [
+                str(m.get('id')) for m in self.long_term
+                if str(m.get('user_id')) == user_id and m.get('id')
+            ]
+            self.long_term = [m for m in self.long_term if str(m.get('user_id')) != user_id]
+            self.user_profiles.pop(user_id, None)
+            for session_id, messages in list(self.short_term.items()):
+                kept = [m for m in messages if str(m.get('user_id')) != user_id]
+                if kept:
+                    self.short_term[session_id] = kept
+                else:
+                    self.short_term.pop(session_id, None)
+            self._save()
+            return removed_ids
 
     # ===== 持久化 =====
     def _save(self):
-        try:
-            data = {'long_term': self.long_term, 'user_profiles': self.user_profiles}
-            temp_file = self.memory_file + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_file, self.memory_file)
-        except Exception as e:
-            print(f'[Memory] 保存失败: {e}')
+        with self._lock:
+            try:
+                data = {'long_term': self.long_term, 'user_profiles': self.user_profiles}
+                temp_file = self.memory_file + '.tmp'
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_file, self.memory_file)
+            except Exception as e:
+                print(f'[Memory] 保存失败: {type(e).__name__}')
 
     def _load(self):
-        try:
-            if os.path.exists(self.memory_file):
+        with self._lock:
+            try:
+                if not os.path.exists(self.memory_file):
+                    return
                 with open(self.memory_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 self.long_term = data.get('long_term', data.get('longTerm', []))
                 self.user_profiles = data.get('user_profiles', data.get('userProfiles', {}))
-        except Exception as e:
-            print(f'[Memory] 加载失败: {e}')
+                migrated = False
+                for item in self.long_term:
+                    if not isinstance(item, dict):
+                        continue
+                    if not item.get('id'):
+                        item['id'] = str(uuid.uuid4())
+                        migrated = True
+                    epoch = float(item.get('time') or time.time())
+                    if not item.get('created_at'):
+                        item['created_at'] = self._iso_from_epoch(epoch)
+                        migrated = True
+                    if not item.get('updated_at'):
+                        item['updated_at'] = item['created_at']
+                        migrated = True
+                    if not item.get('revision'):
+                        item['revision'] = 1
+                        migrated = True
+                    if not item.get('source'):
+                        item['source'] = 'astrbot'
+                        migrated = True
+                    if not isinstance(item.get('keywords'), list):
+                        item['keywords'] = []
+                        migrated = True
+                    item['user_id'] = str(item.get('user_id') or '')
+                if migrated:
+                    if not os.path.exists(self.legacy_backup_file):
+                        shutil.copy2(self.memory_file, self.legacy_backup_file)
+                    self._save()
+            except Exception as e:
+                print(f'[Memory] 加载失败: {type(e).__name__}')
+
+    @staticmethod
+    def _normalize_memory_text(text: str) -> str:
+        return re.sub(r'[\s，。！？、；：,.!?;:]+', '', str(text or '')).lower()
+
+    @staticmethod
+    def _normalize_source(value, fallback: str) -> str:
+        value = str(value or '').strip().lower()
+        return value if value in {'astrbot', 'sheshe'} else fallback
+
+    @staticmethod
+    def _merge_keywords(existing, incoming) -> list[str]:
+        values = []
+        for collection in (existing or [], incoming or []):
+            if isinstance(collection, str):
+                collection = [collection]
+            for value in collection:
+                value = re.sub(r'\s+', ' ', str(value or '')).strip()[:40]
+                if value and value not in values:
+                    values.append(value)
+        return values[:30]
+
+    @staticmethod
+    def _iso_from_epoch(value: float) -> str:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    @staticmethod
+    def _normalize_iso(value) -> str:
+        if value is None:
+            return ''
+        if isinstance(value, (int, float)):
+            return MemorySystem._iso_from_epoch(float(value))
+        text = str(value).strip()
+        if not text:
+            return ''
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+        except ValueError:
+            return ''
+
+    @staticmethod
+    def _epoch_from_iso(value: str) -> float:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (TypeError, ValueError):
+            return time.time()
+
+    def _record_to_shared(self, item: dict) -> dict:
+        created = self._normalize_iso(item.get('created_at')) or self._iso_from_epoch(item.get('time', time.time()))
+        updated = self._normalize_iso(item.get('updated_at')) or created
+        return {
+            'id': str(item.get('id') or ''),
+            'content': str(item.get('summary') or ''),
+            'createdAt': created,
+            'updatedAt': updated,
+            'importance': max(0.0, min(1.0, float(item.get('importance', 0.5)))),
+            'keywords': self._merge_keywords([], item.get('keywords')),
+            'revision': max(1, int(item.get('revision', 1))),
+            'source': self._normalize_source(item.get('source'), 'astrbot'),
+        }
 
     @staticmethod
     def _safe_name(name: str) -> str:

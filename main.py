@@ -13,11 +13,13 @@ AstrBot 活人感插件 - 主入口
   6. /mood 命令查看当前心情
   7. /memory 命令查看对某人的记忆
 """
+import hashlib
 import os
 import re
 import random
 import logging
 import time
+import uuid
 
 from astrbot.api.star import Context, Star
 from astrbot.api.event import AstrMessageEvent
@@ -29,6 +31,12 @@ from astrbot.core.star.register import (
     register_after_message_sent,
 )
 
+try:
+    from astrbot.api.web import request as web_request
+except ImportError:  # AstrBot 4.18 compatibility
+    from quart import request as web_request
+
+from .bridge import BridgeStore
 from .emotion import EmotionSystem
 from .living_state import LivingState
 from .memory import MemorySystem
@@ -38,6 +46,15 @@ from .personalization import match_special_user, special_prompt_text
 from .random_behavior import RandomBehavior
 
 logger = logging.getLogger("alive_persona")
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on', '开启', '是'}
+
 
 
 class AlivePersonaPlugin(Star):
@@ -52,6 +69,8 @@ class AlivePersonaPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context, config)
 
+        self.config = config or {}
+
         # 数据目录
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.data_dir = os.path.join(plugin_dir, 'data')
@@ -63,7 +82,16 @@ class AlivePersonaPlugin(Star):
         self.emotions: dict[str, EmotionSystem] = {}
         self.emotion_last_seen: dict[str, float] = {}
         self.memory = MemorySystem(self.data_dir)
-        self.persona = PersonaEngine(self.data_dir)
+        self.persona = PersonaEngine(self.data_dir, config=self.config)
+        self.bridge_enabled = _as_bool(self.config.get('bridge_enabled'), False)
+        self.bridge_allowed_user_id = str(self.config.get('bridge_allowed_user_id') or '').strip()
+        self.bridge = BridgeStore(
+            self.data_dir,
+            self.memory,
+            self.persona,
+            enabled=self.bridge_enabled,
+            allowed_user_id=self.bridge_allowed_user_id,
+        )
         self.living_state = LivingState()
         self.persona_style = PersonaStyleState(
             trait_anchor_rate=float(self.persona.persona.get('trait_anchor_rate', 0.35)),
@@ -73,6 +101,7 @@ class AlivePersonaPlugin(Star):
         self.behavior_config = {
             'companion_mode': self.persona.persona.get('companion_mode', True),
             'max_reply_chars': int(self.persona.persona.get('max_reply_chars', 60)),
+            'strict_reply_limit': bool(self.persona.persona.get('strict_reply_limit', False)),
             'short_reply_rate': float(self.persona.persona.get('short_reply_rate', 0.06)),
             'light_reply_rate': float(self.persona.persona.get('light_reply_rate', 0.12)),
             'persona_flexibility': float(self.persona.persona.get('persona_flexibility', 0.25)),
@@ -97,10 +126,72 @@ class AlivePersonaPlugin(Star):
         logger.info(f"[AlivePersona] 好感度系统: {'开启' if self.enable_favorability else '关闭'}")
 
     async def initialize(self):
+        try:
+            self.context.register_web_api(
+                route="/astrbot_plugin_alive_persona/sheshe/v1/status",
+                handler=self.sheshe_status,
+                methods=["GET"],
+                desc="蛇蛇机人设与记忆互通状态",
+            )
+            self.context.register_web_api(
+                route="/astrbot_plugin_alive_persona/sheshe/v1/sync",
+                handler=self.sheshe_sync,
+                methods=["POST"],
+                desc="蛇蛇机人设、长期记忆和近期上下文同步",
+            )
+            self.context.register_web_api(
+                route="/astrbot_plugin_alive_persona/sheshe/v1/clear-recent",
+                handler=self.sheshe_clear_recent,
+                methods=["POST"],
+                desc="清空蛇蛇机共享近期上下文",
+            )
+            logger.info("[AlivePersona] 蛇蛇机互通接口已注册")
+        except Exception:
+            logger.exception("[AlivePersona] 蛇蛇机互通接口注册失败")
         logger.info("[AlivePersona] 插件已激活")
 
     async def terminate(self):
         logger.info("[AlivePersona] 插件已停用")
+
+    async def sheshe_status(self):
+        try:
+            return self.bridge.status()
+        except Exception:
+            logger.exception("[AlivePersona] 读取蛇蛇机互通状态失败")
+            return {'ok': False, 'error': '读取互通状态失败'}
+
+    async def sheshe_sync(self):
+        try:
+            return self.bridge.sync(await self._read_web_json())
+        except Exception:
+            logger.exception("[AlivePersona] 蛇蛇机同步失败（正文未写入日志）")
+            return {'ok': False, 'error': '同步处理失败'}
+
+    async def sheshe_clear_recent(self):
+        try:
+            return self.bridge.clear_recent(await self._read_web_json())
+        except Exception:
+            logger.exception("[AlivePersona] 清空共享近期上下文失败")
+            return {'ok': False, 'error': '清空共享近期上下文失败'}
+
+    @staticmethod
+    async def _read_web_json() -> dict:
+        get_json = getattr(web_request, 'get_json', None)
+        if callable(get_json):
+            try:
+                data = await get_json(silent=True)
+            except TypeError:
+                data = await get_json()
+        else:
+            json_reader = getattr(web_request, 'json', None)
+            if callable(json_reader):
+                try:
+                    data = await json_reader(default={})
+                except TypeError:
+                    data = await json_reader()
+            else:
+                data = await json_reader if hasattr(json_reader, '__await__') else json_reader
+        return data if isinstance(data, dict) else {}
 
     # ==================== LLM 钩子 ====================
 
@@ -108,7 +199,7 @@ class AlivePersonaPlugin(Star):
     async def on_llm_request(self, event: AstrMessageEvent, request):
         """在 LLM 请求发出前，注入活人感 system prompt"""
         try:
-            user_id = event.get_sender_id()
+            user_id = str(event.get_sender_id())
             user_name = event.get_sender_name()
             session_id = event.unified_msg_origin
             message_text = event.get_message_str()
@@ -118,6 +209,14 @@ class AlivePersonaPlugin(Star):
             # 更新记忆
             self.memory.add_message(session_id, user_id, user_name, message_text, is_bot=False)
             self.memory.update_profile(user_id, nickname=user_name)
+            if self.bridge.participates(user_id):
+                self.bridge.add_recent(
+                    user_id,
+                    'user',
+                    message_text,
+                    event_id=self._bridge_event_id(event, 'user', message_text),
+                    timestamp=self._event_timestamp(event),
+                )
 
             special = self._match_special_user(user_id, user_name)
             special_prompt = special_prompt_text(special)
@@ -138,7 +237,11 @@ class AlivePersonaPlugin(Star):
 
             # 检查是否需要记住
             if self.memory.should_remember(message_text):
-                self.memory.remember_from_message(session_id, user_id, user_name, message_text)
+                remembered = self.memory.remember_from_message(
+                    session_id, user_id, user_name, message_text
+                )
+                if remembered:
+                    self.bridge.note_astrbot_memory_change(user_id)
 
             mood_desc = emotion.get_mood_description()
             user_desc = self.memory.get_profile_description(user_id, special_prompt=special_prompt)
@@ -150,6 +253,16 @@ class AlivePersonaPlugin(Star):
             recent_context = self.memory.get_recent_context(
                 session_id, self.behavior_config['recent_context_limit'], exclude_latest=True
             )
+            if self.bridge.participates(user_id):
+                shared_recent = self.bridge.hidden_recent_context(
+                    self.memory.get_recent(session_id, limit=20)
+                )
+                if shared_recent:
+                    recent_context = (
+                        f'{recent_context}\n{shared_recent}'.strip()
+                        if recent_context
+                        else shared_recent
+                    )
             light_reply = self.living_state.should_light_reply(
                 message=message_text,
                 relation=relation,
@@ -276,6 +389,15 @@ class AlivePersonaPlugin(Star):
                         session_id, 'bot',
                         self.persona.get_name(), bot_text, is_bot=True
                     )
+                    user_id = str(event.get_sender_id())
+                    if self.bridge.participates(user_id):
+                        self.bridge.add_recent(
+                            user_id,
+                            'assistant',
+                            bot_text,
+                            event_id=self._bridge_event_id(event, 'assistant', bot_text),
+                            timestamp=self._event_timestamp(event),
+                        )
 
     # ==================== 命令 ====================
 
@@ -394,9 +516,46 @@ class AlivePersonaPlugin(Star):
     @register_command("forget", alias={"忘记", "清除记忆"})
     async def cmd_forget(self, event: AstrMessageEvent):
         """清除当前用户的长期记忆和画像。"""
-        self.memory.forget_user(event.get_sender_id())
+        user_id = str(event.get_sender_id())
+        removed_ids = self.memory.forget_user(user_id)
+        self.bridge.note_astrbot_memory_deletions(user_id, removed_ids)
         yield event.plain_result("好，关于你的长期记忆已经清掉了。")
 
+
+    @staticmethod
+    def _event_timestamp(event) -> str:
+        message_obj = getattr(event, 'message_obj', None)
+        value = getattr(message_obj, 'timestamp', None) or getattr(event, 'timestamp', None)
+        if isinstance(value, (int, float)):
+            return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(value))
+        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+    @staticmethod
+    def _bridge_event_id(event, role: str, content: str) -> str:
+        message_obj = getattr(event, 'message_obj', None)
+        raw_id = (
+            getattr(message_obj, 'message_id', None)
+            or getattr(message_obj, 'id', None)
+            or getattr(event, 'message_id', None)
+        )
+        if not raw_id and hasattr(event, 'get_message_id'):
+            try:
+                raw_id = event.get_message_id()
+            except Exception:
+                raw_id = None
+        content_hash = hashlib.sha256(str(content or '').encode('utf-8')).hexdigest()[:20]
+        if raw_id:
+            seed = f'astrbot:{raw_id}:{role}:{content_hash}'
+        else:
+            seed = ':'.join([
+                'astrbot',
+                str(getattr(event, 'unified_msg_origin', '')),
+                str(event.get_sender_id()),
+                AlivePersonaPlugin._event_timestamp(event),
+                role,
+                content_hash,
+            ])
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
     def _process_favorability(
         self, user_id: str, message: str, emotion: EmotionSystem = None
@@ -441,6 +600,8 @@ class AlivePersonaPlugin(Star):
 
     def _reply_char_limit(self, intent: str) -> int:
         base = self.behavior_config['max_reply_chars']
+        if self.behavior_config.get('strict_reply_limit'):
+            return base
         if intent == 'technical':
             return max(base, 220)
         if intent == 'emotional':

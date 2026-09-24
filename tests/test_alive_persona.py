@@ -1,5 +1,6 @@
-import tempfile
 import json
+from pathlib import Path
+import uuid
 
 from living_state import LivingState
 from memory import MemorySystem
@@ -9,8 +10,16 @@ from personalization import match_special_user, special_prompt_text
 from random_behavior import RandomBehavior
 
 
+def make_test_dir():
+    root = Path(__file__).resolve().parents[1] / '.test-data'
+    root.mkdir(parents=True, exist_ok=True)
+    data_dir = root / str(uuid.uuid4())
+    data_dir.mkdir()
+    return str(data_dir)
+
+
 def test_memory_extracts_companion_status_and_social_events():
-    memory = MemorySystem(tempfile.mkdtemp())
+    memory = MemorySystem(make_test_dir())
 
     summaries = memory.extract_memory_summaries("亖", "我有点累，今晚可能早点睡，谢谢你")
     text = "\n".join(item["summary"] for item in summaries)
@@ -21,7 +30,7 @@ def test_memory_extracts_companion_status_and_social_events():
 
 
 def test_memory_extracts_nickname_preference_and_plan():
-    memory = MemorySystem(tempfile.mkdtemp())
+    memory = MemorySystem(make_test_dir())
 
     summaries = memory.extract_memory_summaries("群友", "我叫小林，我喜欢夜晚，明天得记得带伞")
     text = "\n".join(item["summary"] for item in summaries)
@@ -66,7 +75,7 @@ def test_random_behavior_deduplicates_repeated_meaning():
 
 
 def test_recent_status_is_structured_and_described():
-    memory = MemorySystem(tempfile.mkdtemp())
+    memory = MemorySystem(make_test_dir())
     memory.remember_from_message("s", "u", "小林", "我今天有点累")
 
     profile_text = memory.get_profile_description("u")
@@ -75,7 +84,7 @@ def test_recent_status_is_structured_and_described():
 
 
 def test_private_persona_takes_precedence():
-    data_dir = tempfile.mkdtemp()
+    data_dir = make_test_dir()
     with open(f"{data_dir}/persona.json", "w", encoding="utf-8") as f:
         json.dump({"name": "公开"}, f, ensure_ascii=False)
     with open(f"{data_dir}/persona_private.json", "w", encoding="utf-8") as f:
@@ -86,9 +95,24 @@ def test_private_persona_takes_precedence():
     assert persona.loaded_from.endswith("persona_private.json")
 
 
+def test_configured_persona_file_takes_precedence():
+    data_dir = make_test_dir()
+    with open(f"{data_dir}/persona.json", "w", encoding="utf-8") as f:
+        json.dump({"name": "公开"}, f, ensure_ascii=False)
+    with open(f"{data_dir}/persona_private.json", "w", encoding="utf-8") as f:
+        json.dump({"name": "私有"}, f, ensure_ascii=False)
+    with open(f"{data_dir}/persona_nne_2477.json", "w", encoding="utf-8") as f:
+        json.dump({"name": "诺奈"}, f, ensure_ascii=False)
+
+    persona = PersonaEngine(data_dir, config={"persona_file": "persona_nne_2477.json"})
+    assert persona.get_name() == "诺奈"
+    assert persona.loaded_from.endswith("persona_nne_2477.json")
+
+
 def test_living_state_light_reply_skips_requests_and_special_users():
     state = LivingState()
     atmosphere = {"mood": "热闹"}
+    state._random = lambda chance: True
 
     assert not state.should_light_reply("怎么配置api", "stranger", atmosphere, False, 1.0)
     assert not state.should_light_reply("随便说句话", "stranger", atmosphere, True, 1.0)
@@ -120,3 +144,4 @@ def test_catchphrase_cooldown_removes_reused_phrase_edges():
     assert text == "好呀"
 
     assert RandomBehavior.contains_catchphrase("嗯，好呀", ["嗯"])
+
