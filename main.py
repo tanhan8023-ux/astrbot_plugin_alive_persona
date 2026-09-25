@@ -129,19 +129,19 @@ class AlivePersonaPlugin(Star):
         try:
             self.context.register_web_api(
                 route="/astrbot_plugin_alive_persona/sheshe/v1/status",
-                handler=self.sheshe_status,
+                view_handler=self.sheshe_status,
                 methods=["GET"],
                 desc="蛇蛇机人设与记忆互通状态",
             )
             self.context.register_web_api(
                 route="/astrbot_plugin_alive_persona/sheshe/v1/sync",
-                handler=self.sheshe_sync,
+                view_handler=self.sheshe_sync,
                 methods=["POST"],
                 desc="蛇蛇机人设、长期记忆和近期上下文同步",
             )
             self.context.register_web_api(
                 route="/astrbot_plugin_alive_persona/sheshe/v1/clear-recent",
-                handler=self.sheshe_clear_recent,
+                view_handler=self.sheshe_clear_recent,
                 methods=["POST"],
                 desc="清空蛇蛇机共享近期上下文",
             )
