@@ -331,40 +331,65 @@ class AlivePersonaPlugin(Star):
             session_id = event.unified_msg_origin
             mood = self._get_emotion(session_id).get_mood()
             original = response.completion_text
+            message = event.get_message_str()
+            intent = self.persona_style.classify_intent(message)
+            catchphrase_policy = self.persona_style.catchphrase_policy(intent)
+            catchphrases = self.persona.persona.get('catchphrases') or []
 
-            direct = self.random_behavior.before_reply(
-                session_id,
-                event.get_message_str(),
-                repeat_rate=self.behavior_config['repeat_rate'],
-            )
+            # 复读也是“直接替代 LLM 回复”的随机行为。身份、技术、情绪和
+            # 明确问题必须保留实际内容，因此这些场景不能触发复读短回。
+            direct = None
+            if catchphrase_policy['standalone_allowed']:
+                direct = self.random_behavior.before_reply(
+                    session_id,
+                    message,
+                    repeat_rate=self.behavior_config['repeat_rate'],
+                )
             if direct:
                 self.reply_char_limits.pop(session_id, None)
+                self.force_light_reply.pop(session_id, None)
                 response.completion_text = direct
                 return
 
             # 先去除 LLM 重复表达的句子
             original = self.random_behavior.deduplicate(original)
+            max_chars = self.reply_char_limits.pop(
+                session_id, self.behavior_config['max_reply_chars']
+            )
 
             # 随机行为修饰（不再分条，只做文本修饰）
             modified = self.random_behavior.modify_reply(
                 original,
                 mood,
-                max_chars=self.reply_char_limits.pop(
-                    session_id, self.behavior_config['max_reply_chars']
-                ),
+                max_chars=max_chars,
                 short_reply_rate=self.behavior_config['short_reply_rate'],
                 force_short_reply=self.force_light_reply.pop(session_id, False),
                 template_tail_filter=self.behavior_config['template_tail_filter'],
-                allow_short_reply=self.behavior_config['companion_mode'],
-                catchphrases=self.persona.persona.get('catchphrases') or [],
+                # 只有确认、感谢、告别和普通闲聊才允许被压成口头禅式短回。
+                # 身份、技术、情绪和明确问题必须保留实际内容。
+                allow_short_reply=(
+                    self.behavior_config['companion_mode']
+                    and catchphrase_policy['standalone_allowed']
+                ),
+                catchphrases=catchphrases,
                 catchphrase_on_cooldown=(
                     self.persona_style.catchphrase_on_cooldown(session_id)
                     if self.behavior_config['catchphrase_cooldown']
                     else False
                 ),
             )
+
+            # 这是最后一道保险：模型偶尔仍会把口头禅当成完整回答。
+            # 允许短回的场景保留原文，其他场景改成与意图匹配的最小完整回复。
+            if (
+                not catchphrase_policy['standalone_allowed']
+                and self.random_behavior.is_standalone_catchphrase(modified, catchphrases)
+            ):
+                modified = self._fallback_reply_for_intent(intent)
+                modified = self.random_behavior.soft_limit(modified, max_chars)
+
             if self.behavior_config['catchphrase_cooldown'] and self.random_behavior.contains_catchphrase(
-                modified, self.persona.persona.get('catchphrases') or []
+                modified, catchphrases
             ):
                 self.persona_style.mark_catchphrase(session_id)
 
@@ -602,11 +627,27 @@ class AlivePersonaPlugin(Star):
         base = self.behavior_config['max_reply_chars']
         if self.behavior_config.get('strict_reply_limit'):
             return base
+        if intent == 'identity':
+            return max(base, 120)
         if intent == 'technical':
             return max(base, 220)
         if intent == 'emotional':
             return max(base, 120)
         return base
+
+    def _fallback_reply_for_intent(self, intent: str) -> str:
+        """Build a safe non-catchphrase reply when the LLM returns only a phrase."""
+        if intent == 'identity':
+            name = self.persona.get_name().strip()
+            identity = self.persona.get_identity().strip()
+            if identity:
+                return f'我叫{name}，{identity}'
+            return f'我叫{name}'
+        if intent == 'emotional':
+            return '我先听着，你慢慢说'
+        if intent in ('technical', 'question'):
+            return '把具体问题或报错贴出来，我帮你看'
+        return '你直接说就行'
 
     def _extract_keywords(self, text: str) -> list[str]:
         clean = re.sub(r"[，。！？、；：\"（）\[\]{},.!?;:'()\s]", '', text)
@@ -647,6 +688,12 @@ class AlivePersonaPlugin(Star):
         mood = (emotion or self.emotion).get_mood()
         profile = self.memory.get_profile(user_id)
         parts = []
+        intent = (
+            style_decision.get('intent')
+            if style_decision
+            else self.persona_style.classify_intent(message)
+        )
+        catchphrase_policy = self.persona_style.catchphrase_policy(intent)
         if presence_ctx:
             parts.append(presence_ctx)
 
@@ -662,19 +709,26 @@ class AlivePersonaPlugin(Star):
         elif atmosphere.get('mood') == '安静':
             parts.append('群里偏安静，可以正常回，但不要硬追问续话题')
 
-        if re.search(r'(累|困|不舒服|难受|难过|烦|焦虑|崩溃|委屈|压力)', message):
+        if intent == 'identity':
+            parts.append('对方在问你的身份，先直接回答名字、身份或背景，不能只回复“嗯”“好呀”等口头禅')
+        elif intent == 'emotional':
             parts.append('对方在表达状态或情绪，先接住情绪，别立刻说教或列方案')
 
-        if re.search(r'谢谢|感谢|辛苦了', message):
+        if intent == 'acknowledgement':
             parts.append('对方在感谢，可以只用很短的回应，不必每次说不客气')
 
-        if re.search(r'(怎么|如何|为什么|配置|api|url|/v1|密钥|模型|报错|错误)', message, re.I):
+        if intent == 'social':
+            parts.append('这是问候、告别或作息寒暄，允许自然短回，不必强行展开')
+        elif intent in ('technical', 'question'):
             parts.append('这是求助或技术问题，给关键答案即可，不要客服式收尾')
         else:
             parts.append('这不是正式问答，允许只回应其中一小部分')
 
         if light_reply:
-            parts.append('这轮只需要低存在感轻轻接一下，可以用“嗯”“好”“知道了”这类完整短回')
+            if catchphrase_policy['standalone_allowed']:
+                parts.append('这轮只需要低存在感轻轻接一下，可以用“嗯”“好”“知道了”这类完整短回')
+            else:
+                parts.append('这轮可以低存在感，但仍要保留对身份、问题或情绪的实际回应，不能压成口头禅')
 
         if style_decision:
             parts.append(f'人设贴合模式: {style_decision["mode"]}')
@@ -686,13 +740,17 @@ class AlivePersonaPlugin(Star):
                 parts.append('除非对方直接问身份，否则不要主动提身份背景')
             if style_decision.get('catchphrase_on_cooldown'):
                 parts.append('刚用过常用短语，这轮换一种说法')
+            if catchphrase_policy['needs_content']:
+                parts.append('如果使用口头禅，只能自然放在实际回答前后；至少保留一个有内容的回答句，不要单独结束')
+            elif catchphrase_policy['standalone_allowed']:
+                parts.append('这类场景可以自然使用口头禅，但不要为了贴人设强行添加')
 
         if mood in ('sleepy', 'bored', 'upset'):
             parts.append('你现在不太想多说，回复可以更短')
         elif mood in ('excited', 'happy', 'content') and profile.get('message_count', 0) > 10:
             parts.append('心情还行，可以稍微自然一点，但别变话痨')
 
-        limit = self._reply_char_limit(style_decision.get('intent', 'casual') if style_decision else 'casual')
+        limit = self._reply_char_limit(intent)
         parts.append(f'控制在{limit}字以内，避免问句结尾')
         return '。'.join(parts)
 

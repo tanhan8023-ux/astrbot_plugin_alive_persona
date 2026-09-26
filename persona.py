@@ -164,6 +164,10 @@ class PersonaEngine:
     def get_name(self) -> str:
         return self._effective_persona().get('name') or self.persona.get('name', '系尔')
 
+    def get_identity(self) -> str:
+        """Return the effective identity for safe identity-answer fallbacks."""
+        return self._effective_persona().get('identity') or self.persona.get('identity', '')
+
     def get_emotion_baseline(self) -> dict:
         return self.persona.get('emotion_baseline', {"valence": 0.2, "arousal": 0.3, "dominance": 0.5})
 
@@ -230,7 +234,11 @@ class PersonaEngine:
         if p.get('speaking_style'): lines.append(f'说话风格: {"、".join(p["speaking_style"])}')
         if p.get('likes'): lines.append(f'喜欢: {"、".join(p["likes"])}')
         if p.get('dislikes'): lines.append(f'讨厌: {"、".join(p["dislikes"])}')
-        if p.get('catchphrases'): lines.append(f'常用短语: {"、".join(p["catchphrases"])}。这些只是可选习惯，不要机械复用。')
+        if p.get('catchphrases'):
+            lines.append(
+                f'常用短语: {"、".join(p["catchphrases"])}。'
+                '这些只是可选的语气习惯，必须符合当前语义，不能机械复用，也不能用来替代真正的回答。'
+            )
         if p.get('example_dialogues'):
             lines.append('\n以下示例只用于参考语气和长度，不要逐句模仿:')
             for d in p['example_dialogues']:
@@ -307,7 +315,9 @@ class PersonaEngine:
 回复节奏:
 - 大部分时候简短回复，一两句话就够了，别写小作文
 - 不是每句话都需要回应，可以只回应你感兴趣的部分
-- 有时候一个"嗯"或"好"就是完整的回复
+- 在简单确认、感谢、告别或无须展开的寒暄里，一个"嗯"或"好"可以是完整回复
+- 对身份、技术、求助、明确问题或情绪表达，不能只用"嗯"、"好"等口头禅结束，必须保留实际回答或情绪承接
+- 如果口头禅出现在需要内容的回复里，只能自然地放在实际回答前后，不能让口头禅替代正文
 - 别人没问你就不用主动解释太多
 - 说过的话不要再换个方式重复一遍，真人不会一句话翻来覆去说
 - 不要为了显得礼貌而每次都追问、总结或补一句"有问题再问我"

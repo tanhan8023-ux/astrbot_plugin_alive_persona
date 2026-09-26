@@ -82,6 +82,35 @@ class RandomBehavior:
         return any(p and p in text for p in catchphrases)
 
     @staticmethod
+    def is_standalone_catchphrase(text: str, catchphrases: list[str]) -> bool:
+        """Whether ``text`` contains nothing except configured catchphrases.
+
+        LLMs commonly add punctuation or a short pause (for example ``嗯，``
+        or ``好呀。``).  Those should still count as a standalone catchphrase,
+        while ``好呀，我是系尔`` must remain a substantive reply.
+        """
+        if not text or not catchphrases:
+            return False
+
+        def normalize(value: str) -> str:
+            return re.sub(r'[^\w\u4e00-\u9fff]+', '', str(value or ''), flags=re.UNICODE)
+
+        phrase_set = {normalize(phrase) for phrase in catchphrases if normalize(phrase)}
+        if not phrase_set:
+            return False
+
+        normalized_text = normalize(text)
+        if normalized_text in phrase_set:
+            return True
+
+        parts = [
+            normalize(part)
+            for part in re.split(r'[\s，,。．.！!？?；;：:、…~～]+', str(text).strip())
+            if normalize(part)
+        ]
+        return bool(parts) and all(part in phrase_set for part in parts)
+
+    @staticmethod
     def reduce_catchphrase(text: str, catchphrases: list[str]) -> str:
         if not text or not catchphrases:
             return text

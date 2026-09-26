@@ -133,9 +133,45 @@ def test_persona_style_allows_identity_only_when_asked():
 
     asked = style.decide("s1", "你是谁", "stranger", {"mood": "正常"}, False)
     assert asked["allow_identity_mention"]
+    assert asked["intent"] == "identity"
+    assert asked["catchphrase_needs_content"]
+    assert not asked["catchphrase_only_allowed"]
 
     not_asked = style.decide("s2", "今天天气不错", "stranger", {"mood": "正常"}, False)
     assert not not_asked["allow_identity_mention"]
+
+
+def test_persona_style_classifies_identity_questions_before_other_intents():
+    assert PersonaStyleState.classify_intent("你叫什么") == "identity"
+    assert PersonaStyleState.classify_intent("你的身份是什么") == "identity"
+    assert PersonaStyleState.classify_intent("你是什么模型") == "identity"
+    assert PersonaStyleState.classify_intent("你能做什么") == "identity"
+    assert PersonaStyleState.classify_intent("这个怎么配置") == "technical"
+    assert PersonaStyleState.classify_intent("我今天有点难受") == "emotional"
+    assert PersonaStyleState.classify_intent("谢谢你") == "acknowledgement"
+    assert PersonaStyleState.classify_intent("晚安") == "social"
+    assert PersonaStyleState.classify_intent("去吧") == "social"
+    assert PersonaStyleState.classify_intent("你今天怎么样") == "question"
+
+
+def test_catchphrase_only_is_allowed_only_for_natural_short_replies():
+    assert PersonaStyleState.catchphrase_policy("social")["standalone_allowed"]
+    assert PersonaStyleState.catchphrase_policy("acknowledgement")["standalone_allowed"]
+    assert not PersonaStyleState.catchphrase_policy("identity")["standalone_allowed"]
+    assert not PersonaStyleState.catchphrase_policy("technical")["standalone_allowed"]
+    assert not PersonaStyleState.catchphrase_policy("emotional")["standalone_allowed"]
+    assert not PersonaStyleState.catchphrase_policy("question")["standalone_allowed"]
+
+
+def test_standalone_catchphrase_accepts_punctuation_but_not_real_content():
+    phrases = ["嗯", "好呀"]
+
+    assert RandomBehavior.is_standalone_catchphrase("好呀", phrases)
+    assert RandomBehavior.is_standalone_catchphrase("嗯。", phrases)
+    assert RandomBehavior.is_standalone_catchphrase("嗯，", phrases)
+    assert RandomBehavior.is_standalone_catchphrase(" 嗯\n", phrases)
+    assert RandomBehavior.is_standalone_catchphrase("嗯，好呀", phrases)
+    assert not RandomBehavior.is_standalone_catchphrase("好呀，我是系尔", phrases)
 
 
 def test_catchphrase_cooldown_removes_reused_phrase_edges():
